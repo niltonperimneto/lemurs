@@ -89,7 +89,7 @@ focus_behaviour = "default"
 show_background = true
 
 # Path to the background image. If empty, the background color will be used.
-#image = "/path/to/the/image/file.png"
+image = ""
 
 [background.style]
 # Allow to set the default background color for the login shell
