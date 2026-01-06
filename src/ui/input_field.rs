@@ -6,6 +6,7 @@ use ratatui::{
     text::Span,
     widgets::{Block, Borders, Paragraph},
 };
+use std::borrow::Cow;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::{get_color, InputFieldStyle};
@@ -66,7 +67,7 @@ impl InputFieldWidget {
     }
 
     /// Return what string is currently shown to the user for an Echo type field
-    fn show_echo(&self) -> String {
+    fn show_echo(&self) -> Cow<'_, str> {
         let scroll = usize::from(self.scroll);
         let width = usize::from(self.width);
 
@@ -92,10 +93,10 @@ impl InputFieldWidget {
             })
             .map_or(self.content.len(), |(i, _)| i);
 
-        self.content[start_index..end_index].to_string()
+        Cow::Borrowed(&self.content[start_index..end_index])
     }
 
-    fn show_replace(&self, replacement: &str) -> String {
+    fn show_replace(&self, replacement: &str) -> Cow<'_, str> {
         let scroll = usize::from(self.scroll);
         let width = usize::from(self.width);
 
@@ -105,11 +106,11 @@ impl InputFieldWidget {
         let cell_width = usize::min(width, cell_width);
         let cell_width = cell_width / replacement_width;
 
-        replacement.repeat(cell_width)
+        Cow::Owned(replacement.repeat(cell_width))
     }
 
     /// Returns what the displayed string should be
-    fn show_string(&self) -> String {
+    fn show_string(&self) -> Cow<'_, str> {
         use InputFieldDisplayType::{Echo, Replace};
 
         match &self.display_type {

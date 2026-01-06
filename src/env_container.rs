@@ -3,6 +3,7 @@ use std::env;
 use std::marker::PhantomData;
 
 use log::{error, info};
+use secrecy::{ExposeSecret, SecretString};
 
 /// The `EnvironmentContainer` is abstract the process environment and allows for restoring to an
 /// earlier state
@@ -10,7 +11,7 @@ use log::{error, info};
 pub struct EnvironmentContainer {
     snapshot: HashMap<String, String>,
     snapshot_pwd: String,
-    owned: HashMap<&'static str, String>,
+    owned: HashMap<String, SecretString>,
 
     // Ensure that this is not send.
     _no_send: PhantomData<std::sync::MutexGuard<'static, ()>>,
@@ -36,13 +37,14 @@ impl EnvironmentContainer {
     }
 
     /// Set an environment variable and own the value
-    pub fn set(&mut self, key: &'static str, value: impl Into<String>) {
-        let value = value.into();
+    pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        let key = key.into();
+        let value = SecretString::new(value.into());
 
         // SAFETY: We only even call this from one thread.
-        unsafe { env::set_var(key, &value) };
+        unsafe { env::set_var(&key, value.expose_secret()) };
 
-        info!("Set environment variable '{}' to '{}'", key, value);
+        info!("Set environment variable '{}'", key);
 
         self.owned.insert(key, value);
     }
@@ -51,19 +53,20 @@ impl EnvironmentContainer {
     ///
     /// If the variable was already set, then the [`EnvironmentContainer`] considers the value as
     /// one of its own.
-    pub fn set_or_own(&mut self, key: &'static str, value: impl Into<String>) {
-        if let Ok(value) = env::var(key) {
+    pub fn set_or_own(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        let key = key.into();
+        if let Ok(existing_value) = env::var(&key) {
             info!(
-                "Skipped setting environment variable '{}'. It was already set to '{}'",
-                key, value
+                "Skipped setting environment variable '{}'. It was already set",
+                key
             );
-            self.owned.insert(key, value);
+            self.owned.insert(key, SecretString::new(existing_value));
         } else {
             self.set(key, value)
         }
     }
 
-    pub fn remove_var(&mut self, key: &'static str) {
+    pub fn remove_var(&mut self, key: &str) {
         if env::var(key).is_ok() {
             info!("Preemptively removed environment variable '{key}'",);
 
@@ -90,7 +93,7 @@ impl Drop for EnvironmentContainer {
         // Remove all owned variables for which we have an accurate environment value
         info!("Removing session environment variables");
         for (key, value) in self.owned.iter() {
-            if env::var(key).as_ref() == Ok(value) {
+            if env::var(key).as_ref().map(|s| s.as_str()) == Ok(value.expose_secret()) {
                 // SAFETY: We only even call this from one thread.
                 unsafe { env::remove_var(key) };
             }

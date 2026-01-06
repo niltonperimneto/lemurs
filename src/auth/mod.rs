@@ -1,7 +1,9 @@
 mod pam;
 pub mod utmpx;
 
-use ::pam::{Authenticator, PasswordConv};
+use std::collections::HashMap;
+
+use ::pam::{Client, PasswordConv};
 use log::info;
 
 use crate::auth::pam::open_session;
@@ -11,7 +13,7 @@ pub struct AuthUserInfo<'a> {
     // This is used to keep the user session. If the struct is dropped then the user session is
     // also automatically dropped.
     #[allow(dead_code)]
-    authenticator: Authenticator<'a, PasswordConv>,
+    client: Client<'a, PasswordConv>,
 
     #[allow(dead_code)]
     pub username: String,
@@ -23,10 +25,19 @@ pub struct AuthUserInfo<'a> {
     pub shell: String,
 }
 
+impl<'a> AuthUserInfo<'a> {
+    pub fn get_env(&self) -> HashMap<String, String> {
+        // TODO: PAM 0.8.0 client does not expose environment variables via methods like `env` or `getenv`.
+        // We return an empty map for now. Propagating PAM environment variables requires a different approach
+        // or a different crate (e.g. pam-client or unsafe FFI).
+        HashMap::new()
+    }
+}
+
 pub fn try_auth<'a>(
-    username: &str,
-    password: &str,
-    pam_service: &str,
+    username: &'a str,
+    password: &'a str,
+    pam_service: &'a str,
 ) -> Result<AuthUserInfo<'a>, AuthenticationError> {
     info!("Login attempt for '{username}'");
 

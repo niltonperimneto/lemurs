@@ -607,7 +607,6 @@ impl LoginForm {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn login_form_render(
     frame: &mut Frame,
     chunks: Chunks,

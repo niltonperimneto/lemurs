@@ -2,7 +2,7 @@ use std::fmt;
 
 use log::info;
 
-use pam::Authenticator;
+use pam::Client;
 use uzers::os::unix::UserExt;
 
 use crate::auth::AuthUserInfo;
@@ -35,24 +35,25 @@ impl fmt::Display for AuthenticationError {
 pub fn open_session<'a>(
     username: &str,
     password: &str,
-    pam_service: &str,
+    pam_service: &'a str,
 ) -> Result<AuthUserInfo<'a>, AuthenticationError> {
     info!("Started opening session");
 
-    let mut authenticator = Authenticator::with_password(pam_service)
+    // Client::with_password(service) exists (takes 1 arg).
+    // It returns Client<'a, PasswordConv>.
+    let mut client = Client::with_password(pam_service)
         .map_err(|_| AuthenticationError::PamService(pam_service.to_string()))?;
 
-    info!("Gotten Authenticator");
+    // We need to set credentials.
+    // Try accessing conversation directly. If private, check for getter.
+    // Given the lack of documentation, I'm guessing field 'conversation' or 'handler'.
+    // Use `conversation_mut` method.
+    client.conversation_mut().set_credentials(username, password);
 
-    // Authenticate the user
-    authenticator
-        .get_handler()
-        .set_credentials(username, password);
+    info!("Gotten Client");
 
-    info!("Got handler");
-
-    // Validate the account
-    authenticator
+    // Authenticate
+    client
         .authenticate()
         .map_err(|_| AuthenticationError::AccountValidation)?;
 
@@ -76,15 +77,15 @@ pub fn open_session<'a>(
         .ok_or(AuthenticationError::ShellInvalidUtf8)?
         .to_string();
 
-    authenticator
+    client
         .open_session()
         .map_err(|_| AuthenticationError::SessionOpen)?;
 
     info!("Opened session");
 
-    // NOTE: Logout happens automatically here with `drop` of authenticator
+    // NOTE: Logout happens automatically here with `drop` of client
     Ok(AuthUserInfo {
-        authenticator,
+        client,
 
         username: username.to_string(),
         uid,

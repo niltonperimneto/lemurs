@@ -1,14 +1,7 @@
 use std::fs::File;
-use std::io;
 use std::{error::Error, path::Path};
 
-use crossterm::{
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
 use log::{error, info, warn};
-use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
 
 mod auth;
 mod chvt;
@@ -17,6 +10,7 @@ mod config;
 mod env_container;
 mod info_caching;
 mod post_login;
+mod tui_utils;
 mod ui;
 
 use auth::try_auth;
@@ -234,38 +228,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     initialize_panic_handler();
 
+
     // Start application
-    let mut terminal = tui_enable()?;
+    let mut terminal = tui_utils::tui_enable()?;
     let login_form = ui::LoginForm::new(config, cli.preview);
     login_form.run(&mut terminal)?;
-    tui_disable(terminal)?;
+    tui_utils::tui_disable(terminal)?;
 
     info!("Lemurs is booting down");
 
     Ok(())
 }
 
-pub fn tui_enable() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
-
-    info!("UI booted up");
-
-    Ok(terminal)
-}
-
-pub fn tui_disable(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    info!("Reset terminal environment");
-
-    Ok(())
-}
 
 struct Hooks<'a> {
     pre_validate: Option<&'a dyn Fn()>,
@@ -324,6 +298,10 @@ fn start_session(
 
     if let Some(pre_environment_hook) = hooks.pre_environment {
         pre_environment_hook();
+    }
+
+    for (key, value) in auth_session.get_env() {
+        process_env.set_or_own(key, value);
     }
 
     let tty = config.tty;

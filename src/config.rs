@@ -46,6 +46,10 @@ fn str_to_color(color: &str) -> Option<Color> {
 
         // Hex and unknown
         c => {
+            if let Ok(n) = c.parse::<u8>() {
+                return Some(Indexed(n));
+            }
+
             if !c.starts_with('#') || c.len() != 7 {
                 return None;
             }
