@@ -40,9 +40,10 @@ pub fn set_session_params(
     process_env.set("XDG_SESSION_CLASS", "user");
     process_env.set("XDG_SESSION_TYPE", post_login_env.to_xdg_type());
 
-    // TODO: Implement
-    // process_env.set("XDG_CURRENT_DESKTOP", post_login_env.to_xdg_desktop());
-    // process_env.set("XDG_SESSION_DESKTOP", post_login_env.to_xdg_desktop());
+    if let Some(desktop) = post_login_env.to_xdg_desktop() {
+        process_env.set("XDG_CURRENT_DESKTOP", desktop);
+        process_env.set("XDG_SESSION_DESKTOP", desktop);
+    }
 }
 
 pub fn set_seat_vars(process_env: &mut EnvironmentContainer, tty: u8) {
@@ -58,7 +59,7 @@ pub fn set_session_vars(process_env: &mut EnvironmentContainer, uid: u32) {
     info!("Setting XDG Session Variables");
 
     process_env.set_or_own("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
-    process_env.set_or_own("XDG_SESSION_ID", "1");
+    // process_env.set_or_own("XDG_SESSION_ID", "1");
 }
 
 /// Set all the environment variables

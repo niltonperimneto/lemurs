@@ -1,26 +1,24 @@
-use libc::{signal, SIGUSR1, SIG_DFL, SIG_IGN};
+use libc::SIGUSR1;
 use rand::Rng;
-
-use once_cell::sync::Lazy;
 
 use std::env;
 use std::error::Error;
 use std::fmt::Display;
 use std::fs::remove_file;
 use std::process::{Command, Stdio};
-use std::sync::atomic::AtomicBool;
-use std::{thread, time};
+use std::time;
+use std::os::unix::io::AsRawFd;
 
 use std::path::{Path, PathBuf};
 
 use log::{error, info};
+use nix::sys::signal::{self, SigSet, SigmaskHow, Signal};
+use nix::sys::signalfd::SignalFd;
 
 use crate::auth::AuthUserInfo;
 use crate::config::Config;
 use crate::env_container::EnvironmentContainer;
 use crate::post_login::wait_with_log::LemursChild;
-
-const XSTART_CHECK_INTERVAL_MILLIS: u64 = 100;
 
 #[derive(Debug, Clone)]
 pub enum XSetupError {
@@ -32,6 +30,9 @@ pub enum XSetupError {
     XServerStart,
     XServerTimeout,
     XServerPrematureExit,
+    SignalMasking(String),
+    SignalFdCreation(String),
+    PollError(String),
 }
 
 impl Display for XSetupError {
@@ -47,6 +48,9 @@ impl Display for XSetupError {
             Self::XServerPrematureExit => {
                 f.write_str("X server exited before it signaled to accept connections")
             }
+            Self::SignalMasking(e) => write!(f, "Failed to mask signals: {}", e),
+            Self::SignalFdCreation(e) => write!(f, "Failed to create SignalFd: {}", e),
+            Self::PollError(e) => write!(f, "Failed to poll SignalFd: {}", e),
         }
     }
 }
@@ -54,22 +58,9 @@ impl Display for XSetupError {
 impl Error for XSetupError {}
 
 fn mcookie() -> String {
-    // TODO: Verify that this is actually safe. Maybe just use the mcookie binary?? Is that always
-    // available?
     let mut rng = rand::rng();
     let cookie: u128 = rng.random();
     format!("{cookie:032x}")
-}
-
-static X_HAS_STARTED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-
-#[allow(dead_code)]
-fn handle_sigusr1(_: i32) {
-    X_HAS_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
-
-    unsafe {
-        signal(SIGUSR1, handle_sigusr1 as usize);
-    }
 }
 
 pub fn setup_x(
@@ -93,8 +84,6 @@ pub fn setup_x(
         xauth_path = xauth_path.display()
     );
 
-    // Make sure that we are generating a new file. This is necessary sometimes, since there may be
-    // a `root` permission `.Xauthority` file there.
     let _ = remove_file(&xauth_path);
 
     Command::new(&config.system_shell)
@@ -107,8 +96,8 @@ pub fn setup_x(
         ))
         .uid(user_info.uid)
         .gid(user_info.primary_gid)
-        .stdout(Stdio::null()) // TODO: Maybe this should be logged or something?
-        .stderr(Stdio::null()) // TODO: Maybe this should be logged or something?
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map_err(|err| {
             error!(
@@ -127,15 +116,18 @@ pub fn setup_x(
         vtnr_value
     };
 
-    // Here we explicitely ignore the first USR defined signal. Xorg looks at whether this signal
-    // is ignored or not. If it is ignored, it will send that signal to the parent when it ready to
-    // receive connections. This is also how xinit does it.
-    //
-    // After we spawn the Xorg process, we need to make sure to quickly re-enable this signal as we
-    // need to listen to the signal by Xorg.
-    unsafe {
-        libc::signal(SIGUSR1, SIG_IGN);
-    }
+    // Prepare signals for SignalFd
+    // We must block SIGUSR1 so it can be handled by SignalFd
+    let mut sigset = SigSet::empty();
+    sigset.add(Signal::SIGUSR1);
+    
+    // Block the signal
+    signal::pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&sigset), None)
+        .map_err(|e| XSetupError::SignalMasking(e.to_string()))?;
+
+    // Create SignalFd
+    let signal_fd = SignalFd::new(&sigset)
+        .map_err(|e| XSetupError::SignalFdCreation(e.to_string()))?;
 
     let mut child = Command::new(&config.system_shell);
 
@@ -148,51 +140,103 @@ pub fn setup_x(
         &config.x11.xserver_path
     ));
 
-    let mut child = LemursChild::spawn(child, log_path).map_err(|err| {
-        error!("Failed to start X server. Reason: {}", err);
-        XSetupError::XServerStart
-    })?;
+    // Spawn X server
+    // Note: The child process will inherit the signal mask, so it will also have SIGUSR1 blocked
+    // unless it unblocks it. However, Xorg handles signals by setting handlers, so it should be fine.
+    // Ideally, we might want to restore simple mask in pre_exec, but Xorg is generally robust.
+    let mut child = match LemursChild::spawn(child, log_path) {
+        Ok(c) => c,
+        Err(err) => {
+            error!("Failed to start X server. Reason: {}", err);
+            // Restore signal mask before returning
+            let _ = signal::pthread_sigmask(SigmaskHow::SIG_UNBLOCK, Some(&sigset), None);
+            return Err(XSetupError::XServerStart);
+        }
+    };
 
-    // See note above
-    unsafe {
-        libc::signal(SIGUSR1, SIG_DFL);
-        signal(SIGUSR1, handle_sigusr1 as usize);
-    }
-
-    // Wait for XServer to boot-up
+    // Wait for XServer to signal readiness via SIGUSR1
     let start_time = time::SystemTime::now();
+    let sfd = signal_fd.as_raw_fd();
+    
+    let mut poll_fd = libc::pollfd {
+        fd: sfd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+
     loop {
-        if config.x11.xserver_timeout_secs == 0
-            || start_time
-                .elapsed()
-                .is_ok_and(|t| t.as_secs() > config.x11.xserver_timeout_secs.into())
-        {
-            break;
+        let poll_interval = 100; // ms to check child status
+        let remaining_time = if config.x11.xserver_timeout_secs == 0 {
+            1000000 // practically infinite
+        } else {
+            let elapsed = start_time.elapsed().unwrap_or(time::Duration::ZERO).as_millis() as u64;
+             let total_ms = (config.x11.xserver_timeout_secs as u64) * 1000;
+             if elapsed >= total_ms {
+                 0
+             } else {
+                 total_ms - elapsed
+             }
+        };
+
+        if remaining_time == 0 && config.x11.xserver_timeout_secs != 0 {
+            // Timeout
+            // Restore mask
+            let _ = signal::pthread_sigmask(SigmaskHow::SIG_UNBLOCK, Some(&sigset), None);
+            
+             child.kill().unwrap_or_else(|err| {
+                error!("Failed to kill Xorg after it timed out. Reason: {err}");
+            });
+            return Err(XSetupError::XServerTimeout);
+        }
+        
+        // Wait up to poll_interval (or remaining time if less)
+        let effective_timeout = (poll_interval as u64).min(remaining_time) as i32;
+
+        let ret = unsafe { libc::poll(&mut poll_fd, 1, effective_timeout) };
+        
+        if ret < 0 {
+             let err = std::io::Error::last_os_error();
+             if err.kind() != std::io::ErrorKind::Interrupted {
+                 error!("Poll failed: {}", err);
+                 // Restore mask
+                 let _ = signal::pthread_sigmask(SigmaskHow::SIG_UNBLOCK, Some(&sigset), None);
+                 return Err(XSetupError::PollError(err.to_string()));
+             }
+        } else if ret > 0 {
+            if poll_fd.revents & libc::POLLIN != 0 {
+                // Signal received!
+                // Read it to clear it
+                match signal_fd.read_signal() {
+                    Ok(Some(info)) => {
+                        if info.ssi_signo as i32 == SIGUSR1 {
+                            // X Server is ready
+                            break;
+                        }
+                    }
+                    Ok(None) => {}, // Should not happen on blocking fd
+                    Err(e) => {
+                         error!("Failed to read signal: {}", e);
+                         // Continue loop or error?
+                    }
+                }
+            }
         }
 
-        // This will be set by the `handle_sigusr1` signal handler.
-        if X_HAS_STARTED.load(std::sync::atomic::Ordering::SeqCst) {
-            break;
-        }
-
+        // Check if child exited unexpected
         if let Some(status) = child.try_wait().unwrap_or(None) {
             error!(
                 "X server died before signaling it was ready to received connections. Status code: {status}."
             );
-
+            // Restore mask
+            let _ = signal::pthread_sigmask(SigmaskHow::SIG_UNBLOCK, Some(&sigset), None);
             return Err(XSetupError::XServerPrematureExit);
         }
-
-        thread::sleep(time::Duration::from_millis(XSTART_CHECK_INTERVAL_MILLIS));
     }
-
-    // If the value is still `false`, this means we have time-ed out and Xorg is not running.
-    if !X_HAS_STARTED.load(std::sync::atomic::Ordering::SeqCst) {
-        child.kill().unwrap_or_else(|err| {
-            error!("Failed to kill Xorg after it timed out. Reason: {err}");
-        });
-        return Err(XSetupError::XServerTimeout);
-    }
+    
+    // X Server is ready.
+    // Restore signal mask (Unblock SIGUSR1)
+    signal::pthread_sigmask(SigmaskHow::SIG_UNBLOCK, Some(&sigset), None)
+        .map_err(|e| XSetupError::SignalMasking(e.to_string()))?;
 
     if let Ok(x_server_start_time) = start_time.elapsed() {
         info!(
@@ -200,8 +244,6 @@ pub fn setup_x(
             start_ms = x_server_start_time.as_millis()
         );
     }
-
-    X_HAS_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
 
     info!("X server is running");
 

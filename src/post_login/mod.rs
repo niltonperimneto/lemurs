@@ -23,8 +23,14 @@ mod x;
 
 #[derive(Debug, Clone)]
 pub enum PostLoginEnvironment {
-    X { xinitrc_path: String },
-    Wayland { script_path: String },
+    X {
+        xinitrc_path: String,
+        env_name: String,
+    },
+    Wayland {
+        script_path: String,
+        env_name: String,
+    },
     Shell,
 }
 
@@ -37,10 +43,12 @@ impl PostLoginEnvironment {
         }
     }
 
-    // pub fn to_xdg_desktop(&self) -> &str {
-    //     // TODO: Implement properly
-    //     ""
-    // }
+    pub fn to_xdg_desktop(&self) -> Option<&str> {
+        match self {
+            Self::X { env_name, .. } | Self::Wayland { env_name, .. } => Some(env_name),
+            Self::Shell => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -177,7 +185,7 @@ impl PostLoginEnvironment {
         client.arg("-c");
 
         match self {
-            PostLoginEnvironment::X { xinitrc_path } => {
+            PostLoginEnvironment::X { xinitrc_path, .. } => {
                 info!("Starting X11 session");
 
                 let server = setup_x(process_env, user_info, config)
@@ -195,7 +203,7 @@ impl PostLoginEnvironment {
 
                 Ok(SpawnedEnvironment::X11 { server, client })
             }
-            PostLoginEnvironment::Wayland { script_path } => {
+            PostLoginEnvironment::Wayland { script_path, .. } => {
                 info!("Starting Wayland session");
 
                 client.arg(script_path);
@@ -304,7 +312,13 @@ pub fn get_envs(config: &Config) -> Vec<(String, PostLoginEnvironment)> {
                 match parse_desktop_entry(&path, config) {
                     Ok((name, exec)) => {
                         info!("Added environment '{name}' from xsessions");
-                        envs.push((name, PostLoginEnvironment::X { xinitrc_path: exec }));
+                        envs.push((
+                            name.clone(),
+                            PostLoginEnvironment::X {
+                                xinitrc_path: exec,
+                                env_name: name,
+                            },
+                        ));
                     }
                     Err(err) => warn!("Skipping '{}', because {err}", path.display()),
                 }
@@ -327,7 +341,13 @@ pub fn get_envs(config: &Config) -> Vec<(String, PostLoginEnvironment)> {
                 match parse_desktop_entry(&path, config) {
                     Ok((name, exec)) => {
                         info!("Added environment '{name}' from wayland sessions");
-                        envs.push((name, PostLoginEnvironment::Wayland { script_path: exec }))
+                        envs.push((
+                            name.clone(),
+                            PostLoginEnvironment::Wayland {
+                                script_path: exec,
+                                env_name: name,
+                            },
+                        ))
                     }
                     Err(err) => warn!("Skipping '{}', because {err}", path.display()),
                 }
@@ -357,7 +377,7 @@ pub fn get_envs(config: &Config) -> Vec<(String, PostLoginEnvironment)> {
 
                         info!("Added environment '{file_name}' from lemurs x11 scripts");
                         envs.push((
-                            file_name,
+                            file_name.clone(),
                             PostLoginEnvironment::X {
                                 xinitrc_path: match path.path().to_str() {
                                     Some(p) => p.to_string(),
@@ -368,6 +388,7 @@ pub fn get_envs(config: &Config) -> Vec<(String, PostLoginEnvironment)> {
                                         continue;
                                     }
                                 },
+                                env_name: file_name.clone(),
                             },
                         ));
                     } else {
@@ -406,7 +427,7 @@ pub fn get_envs(config: &Config) -> Vec<(String, PostLoginEnvironment)> {
 
                         info!("Added environment '{file_name}' from lemurs wayland scripts");
                         envs.push((
-                            file_name,
+                            file_name.clone(),
                             PostLoginEnvironment::Wayland {
                                 script_path: match path.path().to_str() {
                                     Some(p) => p.to_string(),
@@ -417,6 +438,7 @@ pub fn get_envs(config: &Config) -> Vec<(String, PostLoginEnvironment)> {
                                         continue;
                                     }
                                 },
+                                env_name: file_name.clone(),
                             },
                         ));
                     } else {
