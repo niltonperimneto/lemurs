@@ -238,6 +238,32 @@ pub struct LoginForm {
     config: Config,
 }
 
+// Trait for backends that support enabling/disabling the UI (entering/leaving raw mode/alternate screen)
+pub trait LoginBackend: ratatui::backend::Backend {
+    fn enable_ui(&mut self) -> io::Result<()>;
+    fn disable_ui(&mut self) -> io::Result<()>;
+}
+
+impl<W: io::Write> LoginBackend for CrosstermBackend<W> {
+    fn enable_ui(&mut self) -> io::Result<()> {
+        enable_raw_mode()?;
+        execute!(self, EnterAlternateScreen, crossterm::cursor::Hide)?;
+        Ok(())
+    }
+
+    fn disable_ui(&mut self) -> io::Result<()> {
+        disable_raw_mode()?;
+        execute!(
+            self,
+            LeaveAlternateScreen,
+            Clear(ClearType::All),
+            MoveTo(0, 0),
+            crossterm::cursor::Show
+        )?;
+        Ok(())
+    }
+}
+
 impl LoginForm {
     fn set_cache(&self) {
         let env_remember = self.config.environment_switcher.remember;
@@ -320,8 +346,17 @@ impl LoginForm {
             config,
         }
     }
+}
 
-    pub fn run(self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+
+
+// ... existing LoginForm struct ...
+
+impl LoginForm {
+    // ... existing methods ...
+
+    pub fn run<B: LoginBackend>(self, terminal: &mut Terminal<B>) -> io::Result<()> {
+        terminal.backend_mut().enable_ui()?;
         self.load_cache();
         let input_mode = LoginFormInputMode::new(match self.config.focus_behaviour {
             FocusBehaviour::FirstNonCached => match (
@@ -359,6 +394,7 @@ impl LoginForm {
         let password = self.widgets.password.clone();
         let panel_position = self.config.panel.position.clone();
 
+        // Initial draw
         let draw_action = terminal.draw(|f| {
             let layout = Chunks::new(f, panel_position.clone());
             login_form_render(
@@ -384,9 +420,16 @@ impl LoginForm {
         let event_status_message = status_message.clone();
 
         let (req_send_channel, req_recv_channel) = channel();
+        
+        let widgets = self.widgets.clone();
+        let config = self.config.clone();
+        let preview = self.preview;
+        let myself_clone = self.clone(); // Need to clone self for the thread? self is consumed. 
+        // Actually, run(self) consumes self.
+        // We need to move logic into thread. 
+        
         std::thread::spawn(move || {
-            let mut switcher_hidden = self
-                .widgets
+            let mut switcher_hidden = widgets
                 .environment
                 .lock()
                 .expect("Failed to grab environment lock")
@@ -400,14 +443,14 @@ impl LoginForm {
             };
 
             let pre_auth = || {
-                self.widgets.clear_password();
+                widgets.clear_password();
 
                 status_message.set(InfoStatusMessage::Authenticating);
                 send_ui_request(UIThreadRequest::Redraw);
             };
             let pre_environment = || {
                 // Remember username and environment for next time
-                self.set_cache();
+                myself_clone.set_cache(); // Requires myself_clone
 
                 status_message.set(InfoStatusMessage::LoggingIn);
                 send_ui_request(UIThreadRequest::Redraw);
@@ -432,10 +475,13 @@ impl LoginForm {
             };
 
             loop {
+                // NOTE: event::read() is blocking and uses Crossterm.
+                // If we use KMS, we need to abstract event reading too.
+                // But for now, let's assume TTY input works.
                 if let Ok(Event::Key(key)) = event::read() {
                     match (key.code, input_mode.get(), key.modifiers) {
                         (KeyCode::Enter, InputMode::Password, _) => {
-                            if self.preview {
+                            if preview {
                                 // This is only for demonstration purposes
                                 status_message.set(InfoStatusMessage::Authenticating);
                                 send_ui_request(UIThreadRequest::Redraw);
@@ -449,10 +495,10 @@ impl LoginForm {
                                 send_ui_request(UIThreadRequest::Redraw);
                             } else {
                                 let environment =
-                                    self.widgets.get_environment().map(|(_, content)| content);
-                                let username = self.widgets.get_username();
-                                let password = self.widgets.get_password();
-                                let config = self.config.clone();
+                                    widgets.get_environment().map(|(_, content)| content);
+                                let username = widgets.get_username();
+                                let password = widgets.get_password();
+                                let config = config.clone();
 
                                 let Some(post_login_env) = environment else {
                                     status_message.set(ErrorStatusMessage::NoGraphicalEnvironment);
@@ -487,7 +533,7 @@ impl LoginForm {
                                 }
                             }
                         }
-                        (KeyCode::Char('s'), InputMode::Normal, _) => self.set_cache(),
+                        (KeyCode::Char('s'), InputMode::Normal, _) => myself_clone.set_cache(),
 
                         // On the TTY, it triggers the ALT key for some reason.
                         (KeyCode::Up | KeyCode::BackTab, _, _)
@@ -503,9 +549,11 @@ impl LoginForm {
 
                         // Esc is the overal key to get out of your input mode
                         (KeyCode::Esc, InputMode::Normal, _) => {
-                            if self.preview {
+                            if preview {
                                 info!("Pressed escape in preview mode to exit the application");
-                                req_send_channel.send(UIThreadRequest::StopDrawing).unwrap();
+                                if let Err(e) = req_send_channel.send(UIThreadRequest::StopDrawing) {
+                                    warn!("Failed to send StopDrawing request: {:?}", e);
+                                }
                             }
                         }
 
@@ -514,11 +562,10 @@ impl LoginForm {
                         }
 
                         (KeyCode::F(_), _, _) => {
-                            self.widgets.key_menu.key_press(key.code);
-                            self.widgets.environment_guard().key_press(key.code);
+                            widgets.key_menu.key_press(key.code);
+                            widgets.environment_guard().key_press(key.code);
 
-                            switcher_hidden = self
-                                .widgets
+                            switcher_hidden = widgets
                                 .environment
                                 .lock()
                                 .expect("Failed to grab lock")
@@ -534,13 +581,13 @@ impl LoginForm {
                         (k, mode, modifiers) => {
                             let status_message_opt = match mode {
                                 InputMode::Switcher => {
-                                    self.widgets.environment_guard().key_press(k)
+                                    widgets.environment_guard().key_press(k)
                                 }
                                 InputMode::Username => {
-                                    self.widgets.username_guard().key_press(k, modifiers)
+                                    widgets.username_guard().key_press(k, modifiers)
                                 }
                                 InputMode::Password => {
-                                    self.widgets.password_guard().key_press(k, modifiers)
+                                    widgets.password_guard().key_press(k, modifiers)
                                 }
                                 _ => None,
                             };
@@ -584,19 +631,10 @@ impl LoginForm {
                     }
                 }
                 UIThreadRequest::DisableTui => {
-                    disable_raw_mode()?;
-                    execute!(
-                        terminal.backend_mut(),
-                        LeaveAlternateScreen,
-                        Clear(ClearType::All),
-                        MoveTo(0, 0)
-                    )?;
-                    terminal.show_cursor()?;
+                    terminal.backend_mut().disable_ui()?;
                 }
                 UIThreadRequest::EnableTui => {
-                    enable_raw_mode()?;
-                    let mut stdout = io::stdout();
-                    execute!(stdout, EnterAlternateScreen)?;
+                    terminal.backend_mut().enable_ui()?;
                     terminal.clear()?;
                 }
                 _ => break,

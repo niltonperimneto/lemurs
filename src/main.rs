@@ -12,6 +12,7 @@ mod info_caching;
 mod post_login;
 mod tui_utils;
 mod ui;
+mod gui;
 
 use auth::try_auth;
 use config::Config;
@@ -177,6 +178,41 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Commands::Version => {
                 println!("{}", env!("CARGO_PKG_VERSION"));
+            }
+            Commands::GuiTest => {
+                if uzers::get_current_uid() != 0 {
+                    eprintln!("Error: The 'gui-test' command must be run as root (sudo).");
+                    std::process::exit(1);
+                }
+                info!("Starting DRM/KMS GUI Test...");
+                match gui::kms::KmsBackend::new() {
+                    Ok(backend) => {
+                        println!("DRM Backend Initialized. Starting TUI on Framebuffer...");
+                        
+                        let mut terminal = ratatui::Terminal::new(
+                            gui::backend::KmsRatatuiBackend::new(backend, &config)
+                        ).unwrap_or_else(|e| {
+                            eprintln!("Failed to init Ratatui on KMS: {:?}", e);
+                            std::process::exit(1);
+                        });
+
+                        // Minimal config for test
+                        config.tty = 2; // Use TTY2 or whatever
+                        
+                        // We run the actual LoginForm now!
+                        let login_form = ui::LoginForm::new(config, true); // true = preview mode
+
+                        if let Err(e) = login_form.run(&mut terminal) {
+                            eprintln!("Error running login form: {:?}", e);
+                        }
+                        
+                        println!("Test complete.");
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to initialize DRM backend: {:?}", e);
+                        std::process::exit(1);
+                    }
+                }
             }
         }
 

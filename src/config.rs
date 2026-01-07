@@ -200,6 +200,11 @@ toml_config_struct! { Config, PartialConfig, RoughConfig,
     client_log_path => String,
     cache_path => String,
 
+    font_path => String,
+    // I should check if I can add f32 support, or simpler: use u16 for font_size and cast to f32.
+    // Let's use u16 for font_size (pixels) to match other fields like `hint_margin`.
+    font_size => u16,
+
     do_log => bool,
 
     pam_service => String,

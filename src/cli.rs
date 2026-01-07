@@ -26,6 +26,7 @@ OPTIONS:
 SUBCOMMANDS:
     cache
     envs
+    gui-test
     help     Print this message or the help of the given subcommand(s)
 "###,
         env!("CARGO_PKG_VERSION"),
@@ -50,6 +51,7 @@ pub enum Commands {
     Cache,
     Help,
     Version,
+    GuiTest,
 }
 
 #[derive(Debug)]
@@ -79,6 +81,13 @@ impl Error for CliError {}
 
 impl Cli {
     pub fn parse() -> Result<Self, CliError> {
+        Self::parse_args(args().skip(1))
+    }
+
+    pub fn parse_args<I>(args: I) -> Result<Self, CliError>
+    where
+        I: Iterator<Item = String>,
+    {
         let mut cli = Cli {
             preview: false,
             no_log: false,
@@ -91,13 +100,14 @@ impl Cli {
             initial_path: None,
         };
 
-        let mut args = args().skip(1).enumerate();
+        let mut args = args.enumerate();
         while let Some((i, arg)) = args.next() {
             match (i, arg.trim()) {
-                (0, "envs") => cli.command = Some(Commands::Envs),
-                (0, "cache") => cli.command = Some(Commands::Cache),
-                (0, "help") | (_, "--help") | (_, "-h") => cli.command = Some(Commands::Help),
+                (_, "envs") => cli.command = Some(Commands::Envs),
+                (_, "cache") => cli.command = Some(Commands::Cache),
+                (_, "help") | (_, "--help") | (_, "-h") => cli.command = Some(Commands::Help),
                 (_, "--version") | (_, "-V") => cli.command = Some(Commands::Version),
+                (_, "gui-test") => cli.command = Some(Commands::GuiTest),
 
                 (_, "--preview") => cli.preview = true,
                 (_, "--no-log") => cli.no_log = true,
@@ -142,5 +152,33 @@ impl Cli {
         }
 
         Ok(cli)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gui_test_subcommand() {
+        let args = vec!["gui-test".to_string()];
+        let cli = Cli::parse_args(args.into_iter()).unwrap();
+        assert!(matches!(cli.command, Some(Commands::GuiTest)));
+    }
+
+    #[test]
+    fn test_gui_test_after_flags() {
+        let args = vec!["--preview".to_string(), "gui-test".to_string()];
+        let cli = Cli::parse_args(args.into_iter()).unwrap();
+        assert!(cli.preview);
+        assert!(matches!(cli.command, Some(Commands::GuiTest)));
+    }
+
+    #[test]
+    fn test_gui_test_before_flags() {
+        let args = vec!["gui-test".to_string(), "--preview".to_string()];
+        let cli = Cli::parse_args(args.into_iter()).unwrap();
+        assert!(cli.preview);
+        assert!(matches!(cli.command, Some(Commands::GuiTest)));
     }
 }

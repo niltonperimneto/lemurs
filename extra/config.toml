@@ -54,6 +54,9 @@ client_log_path = "/var/log/lemurs.client.log"
 # you can use `/dev/null`.
 cache_path = "/var/cache/lemurs"
 
+font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+font_size = 24
+
 # Disable all logging. This is overwritten by the `--no-log` flag.
 do_log = true
 
@@ -91,7 +94,7 @@ focus_behaviour = "default"
 show_background = true
 
 # Path to the background image. If empty, the background color will be used.
-image = "/home/niltonperimneto/Imagens/wallpapers/pixel.png"
+image = "/home/niltonperimneto/Pictures/wallpapers/pixel.png"
 
 [background.style]
 # Allow to set the default background color for the login shell
