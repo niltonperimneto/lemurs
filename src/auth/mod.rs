@@ -35,8 +35,8 @@ impl<'a> AuthUserInfo<'a> {
 }
 
 pub fn try_auth<'a>(
-    username: &'a str,
-    password: &'a str,
+    username: &str,
+    password: &str,
     pam_service: &'a str,
 ) -> Result<AuthUserInfo<'a>, AuthenticationError> {
     info!("Login attempt for '{username}'");

@@ -92,26 +92,6 @@ impl LemursChild {
         }
     }
 
-    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        match self {
-            Self::NoLog(process) => process.try_wait(),
-            Self::Log(process) => process.try_wait(),
-        }
-    }
-
-    pub fn kill(&mut self) -> io::Result<()> {
-        match self {
-            Self::NoLog(process) => process.kill(),
-            Self::Log(process) => process.kill(),
-        }
-    }
-
-    pub fn send_sigterm(&self) -> io::Result<()> {
-        unsafe { libc::kill(self.id() as libc::pid_t, libc::SIGTERM) };
-
-        Ok(())
-    }
-
     pub fn id(&self) -> u32 {
         match self {
             Self::NoLog(process) => process.id(),
@@ -248,25 +228,6 @@ impl LimitedOutputChild {
         self.stop_logging()?;
 
         Ok(exit_status)
-    }
-
-    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        let exit_status = match self.process.try_wait()? {
-            None => return Ok(None),
-            Some(exit_status) => exit_status,
-        };
-
-        self.stop_logging()?;
-
-        Ok(Some(exit_status))
-    }
-
-    pub fn kill(&mut self) -> io::Result<()> {
-        self.process.kill()?;
-
-        self.stop_logging()?;
-
-        Ok(())
     }
 
     pub fn id(&self) -> u32 {

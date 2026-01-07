@@ -4,12 +4,6 @@ use crate::env_container::EnvironmentContainer;
 
 use super::PostLoginEnvironment;
 
-pub fn set_display(display: &str, process_env: &mut EnvironmentContainer) {
-    info!("Setting Display");
-
-    process_env.set("DISPLAY", display);
-}
-
 pub fn remove_xdg(process_env: &mut EnvironmentContainer) {
     info!("Clearing XDG preemptively to set later");
 

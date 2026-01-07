@@ -223,7 +223,6 @@ toml_config_struct! { Config, PartialConfig, RoughConfig,
     username_field => UsernameFieldConfig [PartialUsernameFieldConfig, RoughUsernameFieldConfig],
     password_field => PasswordFieldConfig [PartialPasswordFieldConfig, RoughPasswordFieldConfig],
 
-    x11 => X11Config [PartialX11Config, RoughX11Config],
     wayland => WaylandConfig [PartialWaylandConfig, RoughWaylandConfig],
 }
 
@@ -382,21 +381,6 @@ toml_config_struct! { UsernameFieldConfig, PartialUsernameFieldConfig, RoughUser
 toml_config_struct! { PasswordFieldConfig, PartialPasswordFieldConfig, RoughPasswordFieldConfig,
     content_replacement_character => char,
     style => InputFieldStyle [PartialInputFieldStyle, RoughInputFieldStyle],
-}
-
-toml_config_struct! { X11Config, PartialX11Config, RoughX11Config,
-    x11_display => String,
-
-    xserver_timeout_secs => u16,
-
-    xserver_log_path => String,
-
-    xserver_path => String,
-    xauth_path => String,
-
-    scripts_path => String,
-    xsetup_path => String,
-    xsessions_path => String,
 }
 
 toml_config_struct! { WaylandConfig, PartialWaylandConfig, RoughWaylandConfig,
@@ -741,6 +725,7 @@ struct VariableIterator<'a> {
     offset: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Variable<'a> {
     start: usize,
     ident: &'a str,
@@ -791,36 +776,4 @@ impl<'a> Iterator for VariableIterator<'a> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::VariableIterator;
-
-    #[test]
-    fn test_variable_iterator() {
-        macro_rules! assert_var_iter {
-            (
-                $s:literal,
-                ($($ident:literal),*)
-            ) => {
-                let variables: Vec<String> = VariableIterator::new($s).map(|v| v.ident().to_string()).collect();
-                let idents: &[&str] = &[$($ident),*];
-
-                eprintln!("variables = {variables:?}");
-                eprintln!("ident = {idents:?}");
-
-                assert_eq!(
-                    &variables,
-                    idents,
-                );
-            };
-        }
-
-        assert_var_iter!("", ());
-        assert_var_iter!("abcdef", ());
-        assert_var_iter!("$a", ("a"));
-        assert_var_iter!("$a$b", ("a", "b"));
-        assert_var_iter!("$a_c$b", ("a_c", "b"));
-        assert_var_iter!("$a()$b", ("a", "b"));
-        assert_var_iter!("$0    $1", ("0", "1"));
-        assert_var_iter!("$var1    $var2    $var3  ", ("var1", "var2", "var3"));
-    }
-}
+mod tests;

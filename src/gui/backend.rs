@@ -5,8 +5,18 @@ use ratatui::buffer::Cell;
 
 use std::io;
 use std::fs;
-use rusttype::{Font, Scale, Point, PositionedGlyph};
+use rusttype::{Font, Scale, Point};
 use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
+
+use std::collections::HashMap;
+
+struct CachedGlyph {
+    width: u32,
+    height: u32,
+    bitmap: Vec<u8>, // Alpha values 0-255
+    offset_x: i32,
+    offset_y: i32,
+}
 
 pub struct KmsRatatuiBackend {
     kms: KmsBackend,
@@ -15,18 +25,17 @@ pub struct KmsRatatuiBackend {
     scale: Scale,
     char_width: u32,
     char_height: u32,
+    glyph_cache: HashMap<char, CachedGlyph>,
 }
 
 impl KmsRatatuiBackend {
     pub fn new(kms: KmsBackend, config: &crate::config::Config) -> Self {
         // Load font with fallback strategy
         let mut font_data = Vec::new();
-        let mut loaded_path = String::new();
 
         // 1. Try configured path
         if let Ok(data) = fs::read(&config.font_path) {
             font_data = data;
-            loaded_path = config.font_path.clone();
         } else {
             eprintln!("Warning: Failed to load configured font at '{}'", config.font_path);
             
@@ -42,7 +51,6 @@ impl KmsRatatuiBackend {
             for path in fallbacks {
                 if let Ok(data) = fs::read(path) {
                     font_data = data;
-                    loaded_path = path.to_string();
                     eprintln!("Fallback: Loaded font from '{}'", path);
                     break;
                 }
@@ -74,6 +82,7 @@ impl KmsRatatuiBackend {
             scale,
             char_width,
             char_height,
+            glyph_cache: HashMap::new(),
         }
     }
 
@@ -101,6 +110,45 @@ impl KmsRatatuiBackend {
         }
     }
 
+    // Rasterize a character and return its cached data
+    fn get_cached_glyph(&mut self, c: char) -> &CachedGlyph {
+        if !self.glyph_cache.contains_key(&c) {
+             let v_metrics = self.font.v_metrics(self.scale);
+             let glyph = self.font.glyph(c).scaled(self.scale).positioned(point(0.0, v_metrics.ascent));
+             
+             let mut bitmap = Vec::new();
+             let mut width = 0;
+             let mut height = 0;
+             let mut offset_x = 0;
+             let mut offset_y = 0;
+
+             if let Some(bb) = glyph.pixel_bounding_box() {
+                 width = bb.width() as u32;
+                 height = bb.height() as u32;
+                 offset_x = bb.min.x;
+                 offset_y = bb.min.y;
+                 
+                 bitmap.resize((width * height) as usize, 0);
+                 
+                 glyph.draw(|x, y, v| {
+                     let idx = (y * width + x) as usize;
+                     if idx < bitmap.len() {
+                         bitmap[idx] = (v * 255.0) as u8;
+                     }
+                 });
+             }
+             
+             self.glyph_cache.insert(c, CachedGlyph {
+                 width,
+                 height,
+                 bitmap,
+                 offset_x,
+                 offset_y,
+             });
+        }
+        self.glyph_cache.get(&c).unwrap()
+    }
+
     fn set_cursor_state(&mut self, x: u16, y: u16) {
         self.cursor_pos = Some((x, y));
         let char_width = self.char_width;
@@ -109,11 +157,8 @@ impl KmsRatatuiBackend {
         let py = y as i32 * char_height as i32;
         
         // Draw a simple cursor block (white) at the bottom
-        for dy in (char_height - 4)..char_height {
-             for dx in 0..char_width {
-                 self.kms.set_pixel((px + dx as i32) as u32, (py + dy as i32) as u32, 0x00FFFFFF);
-             }
-        }
+        // Use fill_rect for efficiency
+        self.kms.fill_rect(px as u32, (py + char_height as i32 - 4) as u32, char_width, 4, 0x00FFFFFF);
     }
 }
 
@@ -123,56 +168,54 @@ impl Backend for KmsRatatuiBackend {
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
         for (x, y, cell) in content {
-            // Calculate pixel position
             let px = x as i32 * self.char_width as i32;
             let py = y as i32 * self.char_height as i32;
             
-            // 1. Draw Background
             let bg_color = Self::color_to_rgb(cell.bg);
-            for dy in 0..self.char_height {
-                for dx in 0..self.char_width {
-                    self.kms.set_pixel((px + dx as i32) as u32, (py + dy as i32) as u32, bg_color);
-                }
-            }
-
-            // 2. Draw Foreground (Text) with RustType
-            let fg_color = Self::color_to_rgb(cell.fg);
-            let content_str = cell.symbol();
+            self.kms.fill_rect(px as u32, py as u32, self.char_width, self.char_height, bg_color);
             
+            let content_str = cell.symbol();
             if content_str.is_empty() || content_str == " " {
                 continue;
             }
 
-            // Simple blending: alpha composition against bg_color
-            let v_metrics = self.font.v_metrics(self.scale);
-            let offset = point(px as f32, py as f32 + v_metrics.ascent); // Baseline
+            let fg_color = Self::color_to_rgb(cell.fg);
+            let bg_r = (bg_color >> 16) & 0xFF;
+            let bg_g = (bg_color >> 8) & 0xFF;
+            let bg_b = bg_color & 0xFF;
 
-            for glyph in self.font.layout(content_str, self.scale, offset) {
-                if let Some(bb) = glyph.pixel_bounding_box() {
-                    glyph.draw(|gx, gy, v| {
-                         let screen_x = gx as i32 + bb.min.x;
-                         let screen_y = gy as i32 + bb.min.y;
-                         
-                         let alpha = v;
-                         if alpha < 0.1 { return; } // Optimization
+            let fg_r = (fg_color >> 16) & 0xFF;
+            let fg_g = (fg_color >> 8) & 0xFF;
+            let fg_b = fg_color & 0xFF;
 
-                         // Decompose colors
-                         let bg_r = (bg_color >> 16) & 0xFF;
-                         let bg_g = (bg_color >> 8) & 0xFF;
-                         let bg_b = bg_color & 0xFF;
+            for c in content_str.chars() {
+                if !self.glyph_cache.contains_key(&c) {
+                    self.get_cached_glyph(c);
+                }
+                
+                let glyph = self.glyph_cache.get(&c).unwrap();
+                
+                // Now we have the glyph data (immutable borrow of cache), we can mutate kms.
+                let screen_x_base = px + glyph.offset_x;
+                let screen_y_base = py + glyph.offset_y;
 
-                         let fg_r = (fg_color >> 16) & 0xFF;
-                         let fg_g = (fg_color >> 8) & 0xFF;
-                         let fg_b = fg_color & 0xFF;
+                for gy in 0..glyph.height {
+                     for gx in 0..glyph.width {
+                          let alpha = glyph.bitmap[(gy * glyph.width + gx) as usize] as u32;
+                          if alpha == 0 { continue; }
 
-                         let out_r = ((fg_r as f32 * alpha) + (bg_r as f32 * (1.0 - alpha))) as u32;
-                         let out_g = ((fg_g as f32 * alpha) + (bg_g as f32 * (1.0 - alpha))) as u32;
-                         let out_b = ((fg_b as f32 * alpha) + (bg_b as f32 * (1.0 - alpha))) as u32;
+                          let screen_x = screen_x_base + gx as i32;
+                          let screen_y = screen_y_base + gy as i32;
 
-                         let out_color = (out_r << 16) | (out_g << 8) | out_b;
-                         
-                         self.kms.set_pixel(screen_x as u32, screen_y as u32, out_color);
-                    });
+                          let inv_alpha = 255 - alpha;
+                          
+                          let out_r = (fg_r * alpha + bg_r * inv_alpha) / 255;
+                          let out_g = (fg_g * alpha + bg_g * inv_alpha) / 255;
+                          let out_b = (fg_b * alpha + bg_b * inv_alpha) / 255;
+                          
+                          let out_color = (out_r << 16) | (out_g << 8) | out_b;
+                          self.kms.set_pixel(screen_x as u32, screen_y as u32, out_color);
+                     }
                 }
             }
         }

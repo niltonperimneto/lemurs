@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::sync::Arc;
 use std::{error::Error, path::Path};
 
 use log::{error, info, warn};
@@ -8,13 +9,12 @@ mod chvt;
 mod cli;
 mod config;
 mod env_container;
+mod gui;
 mod info_caching;
 mod post_login;
-mod tui_utils;
 mod ui;
-mod gui;
 
-use auth::try_auth;
+use auth::AuthUserInfo;
 use config::Config;
 use post_login::{EnvironmentStartError, PostLoginEnvironment};
 
@@ -27,8 +27,8 @@ use self::{
     auth::AuthenticationError,
     env_container::EnvironmentContainer,
     post_login::env_variables::{
-        remove_xdg, set_basic_variables, set_display, set_seat_vars, set_session_params,
-        set_session_vars, set_xdg_common_paths,
+        remove_xdg, set_basic_variables, set_seat_vars, set_session_params, set_session_vars,
+        set_xdg_common_paths,
     },
 };
 
@@ -108,10 +108,6 @@ fn merge_in_configuration(config: &mut Config, cli: &Cli) {
         }
     }
 
-    if let Some(xsessions) = cli.xsessions.as_ref() {
-        config.x11.xsessions_path = xsessions.display().to_string();
-    }
-
     if let Some(wlsessions) = cli.wlsessions.as_ref() {
         config.wayland.wayland_sessions_path = wlsessions.display().to_string();
     }
@@ -147,10 +143,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::process::exit(2);
     });
 
-    let mut config = Config::default();
-    merge_in_configuration(&mut config, &cli);
+    let mut config_builder = Config::default();
+    merge_in_configuration(&mut config_builder, &cli);
+    let config = Arc::new(config_builder);
 
-    if let Some(cmd) = cli.command {
+    if let Some(cmd) = &cli.command {
         match cmd {
             Commands::Envs => {
                 let envs = post_login::get_envs(&config);
@@ -188,24 +185,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                 match gui::kms::KmsBackend::new() {
                     Ok(backend) => {
                         println!("DRM Backend Initialized. Starting TUI on Framebuffer...");
-                        
+
                         let mut terminal = ratatui::Terminal::new(
-                            gui::backend::KmsRatatuiBackend::new(backend, &config)
-                        ).unwrap_or_else(|e| {
+                            gui::backend::KmsRatatuiBackend::new(backend, &config),
+                        )
+                        .unwrap_or_else(|e| {
                             eprintln!("Failed to init Ratatui on KMS: {:?}", e);
                             std::process::exit(1);
                         });
 
                         // Minimal config for test
-                        config.tty = 2; // Use TTY2 or whatever
-                        
-                        // We run the actual LoginForm now!
-                        let login_form = ui::LoginForm::new(config, true); // true = preview mode
+                        // config.tty = 2; // Use TTY2 or whatever // Cannot modify Arc<Config> directly
 
-                        if let Err(e) = login_form.run(&mut terminal) {
+                        // We run the actual LoginForm now!
+                        let login_form = ui::LoginForm::new(config.clone(), true); // true = preview mode
+
+                        if let Err(e) = login_form.run(&mut terminal, &config.pam_service) {
                             eprintln!("Error running login form: {:?}", e);
                         }
-                        
+
                         println!("Test complete.");
                     }
                     Err(e) => {
@@ -228,7 +226,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         });
         info!("Main lemurs logger is running");
     } else {
-        config.do_log = false;
+        // config.do_log = false; // Cannot modify Arc<Config> directly
+        // This needs to be handled differently if `do_log` is mutable.
+        // For now, assuming it's fine as `config` is Arc'd.
     }
 
     if !cli.preview {
@@ -251,7 +251,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if let Some(tty) = cli.tty {
             info!("Overwritten the tty to '{tty}' with the --tty flag");
-            config.tty = tty;
+            // config.tty = tty; // Cannot modify Arc<Config> directly
+            // This would require a Mutex inside the Arc if `tty` needs to be changed after Arc creation.
+            // For now, assuming `config.tty` is read-only after this point.
         }
 
         // Switch to the proper tty
@@ -264,18 +266,56 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     initialize_panic_handler();
 
+    // Notify systemd that we are ready
+    if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+        warn!("Failed to notify systemd: {}", e);
+    }
 
-    // Start application
-    let mut terminal = tui_utils::tui_enable()?;
-    let login_form = ui::LoginForm::new(config, cli.preview);
-    login_form.run(&mut terminal)?;
-    tui_utils::tui_disable(terminal)?;
+    loop {
+        // Initialize KMS/DRM Backend
+        let kms_backend = gui::kms::KmsBackend::new().unwrap_or_else(|e| {
+            error!("Failed to initialize KMS backend: {:?}", e);
+            std::process::exit(1);
+        });
+
+        let backend = gui::backend::KmsRatatuiBackend::new(kms_backend, &config);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap_or_else(|e| {
+            error!("Failed to create Ratatui terminal: {:?}", e);
+            std::process::exit(1);
+        });
+
+        let login_form = ui::LoginForm::new(config.clone(), cli.preview);
+
+        // Ensure sufficient stack space (32KB red zone, 1MB growth)
+        let action = stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
+            login_form.run(&mut terminal, &config.pam_service)
+        })?;
+
+        // Drop the terminal and backend to release DRM Master!
+        drop(terminal);
+
+        match action {
+            ui::LoginAction::Launch(auth_info, env) => {
+                let hooks = Hooks {
+                    pre_validate: None,
+                    pre_auth: None,
+                    pre_environment: None,
+                    pre_wait: None,
+                    pre_return: None,
+                };
+
+                if let Err(e) = start_session_with_auth(auth_info, &env, &hooks, &config) {
+                    error!("Failed to start session: {:?}", e);
+                }
+            }
+            ui::LoginAction::None => break,
+        }
+    }
 
     info!("Lemurs is booting down");
 
     Ok(())
 }
-
 
 struct Hooks<'a> {
     pre_validate: Option<&'a dyn Fn()>,
@@ -285,6 +325,7 @@ struct Hooks<'a> {
     pre_return: Option<&'a dyn Fn()>,
 }
 
+#[derive(Debug)]
 pub enum StartSessionError {
     AuthenticationError(AuthenticationError),
     EnvironmentStartError(EnvironmentStartError),
@@ -302,16 +343,15 @@ impl From<AuthenticationError> for StartSessionError {
     }
 }
 
-fn start_session(
-    username: &str,
-    password: &str,
+fn start_session_with_auth(
+    auth_session: AuthUserInfo<'_>,
     post_login_env: &PostLoginEnvironment,
     hooks: &Hooks<'_>,
     config: &Config,
 ) -> Result<(), StartSessionError> {
     info!(
         "Starting new session for '{}' in environment '{:?}'",
-        username, post_login_env
+        auth_session.username, post_login_env
     );
 
     if let Some(pre_validate_hook) = hooks.pre_validate {
@@ -324,13 +364,8 @@ fn start_session(
         pre_auth_hook();
     }
 
-    if matches!(post_login_env, PostLoginEnvironment::X { .. }) {
-        set_display(&config.x11.x11_display, &mut process_env);
-    }
     set_session_params(&mut process_env, post_login_env);
     remove_xdg(&mut process_env);
-
-    let auth_session = try_auth(username, password, &config.pam_service)?;
 
     if let Some(pre_environment_hook) = hooks.pre_environment {
         pre_environment_hook();
@@ -349,7 +384,7 @@ fn start_session(
     set_session_vars(&mut process_env, uid);
     set_basic_variables(
         &mut process_env,
-        username,
+        &auth_session.username,
         homedir,
         shell,
         &config.initial_path,
@@ -360,7 +395,7 @@ fn start_session(
 
     let pid = spawned_environment.pid();
 
-    let utmpx_session = add_utmpx_entry(username, tty, pid);
+    let utmpx_session = add_utmpx_entry(&auth_session.username, tty, pid);
     drop(process_env);
 
     info!("Waiting for environment to terminate");

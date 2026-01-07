@@ -10,23 +10,16 @@ use std::process::{Child, Command, Stdio};
 use crate::auth::AuthUserInfo;
 use crate::config::{Config, ShellLoginFlag};
 use crate::env_container::EnvironmentContainer;
-use crate::post_login::x::setup_x;
 
 use nix::unistd::{Gid, Uid};
 
 use self::wait_with_log::LemursChild;
-use self::x::XSetupError;
 
 pub(crate) mod env_variables;
 mod wait_with_log;
-mod x;
 
 #[derive(Debug, Clone)]
 pub enum PostLoginEnvironment {
-    X {
-        xinitrc_path: String,
-        env_name: String,
-    },
     Wayland {
         script_path: String,
         env_name: String,
@@ -38,14 +31,13 @@ impl PostLoginEnvironment {
     pub fn to_xdg_type(&self) -> &'static str {
         match self {
             Self::Shell => "tty",
-            Self::X { .. } => "x11",
             Self::Wayland { .. } => "wayland",
         }
     }
 
     pub fn to_xdg_desktop(&self) -> Option<&str> {
         match self {
-            Self::X { env_name, .. } | Self::Wayland { env_name, .. } => Some(env_name),
+            Self::Wayland { env_name, .. } => Some(env_name),
             Self::Shell => None,
         }
     }
@@ -54,8 +46,6 @@ impl PostLoginEnvironment {
 #[derive(Debug, Clone)]
 pub enum EnvironmentStartError {
     WaylandStart,
-    XSetup(XSetupError),
-    XStartEnv,
     TTYStart,
 }
 
@@ -63,19 +53,12 @@ impl Display for EnvironmentStartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::WaylandStart => f.write_str("Failed to start Wayland compositor"),
-            Self::XSetup(err) => write!(f, "Failed to setup X11 server. Reason: '{err}'"),
-            Self::XStartEnv => f.write_str("Failed to start X11 client"),
             Self::TTYStart => f.write_str("Failed to start TTY"),
         }
     }
 }
 
 impl Error for EnvironmentStartError {}
-impl From<XSetupError> for EnvironmentStartError {
-    fn from(value: XSetupError) -> Self {
-        Self::XSetup(value)
-    }
-}
 
 fn lower_command_permissions_to_user(
     mut command: Command,
@@ -105,10 +88,6 @@ fn lower_command_permissions_to_user(
 }
 
 pub enum SpawnedEnvironment {
-    X11 {
-        server: LemursChild,
-        client: LemursChild,
-    },
     Wayland(LemursChild),
     Tty(Child),
 }
@@ -116,7 +95,7 @@ pub enum SpawnedEnvironment {
 impl SpawnedEnvironment {
     pub fn pid(&self) -> u32 {
         match self {
-            Self::X11 { client, .. } | Self::Wayland(client) => client.id(),
+            Self::Wayland(client) => client.id(),
             Self::Tty(client) => client.id(),
         }
     }
@@ -125,29 +104,6 @@ impl SpawnedEnvironment {
         info!("Waiting for client to exit");
 
         match self {
-            Self::X11 {
-                mut client,
-                mut server,
-            } => {
-                match client.wait() {
-                    Ok(exit_code) => info!("Client exited with exit code `{exit_code}`"),
-                    Err(err) => {
-                        error!("Failed to wait for client. Reason: {err}");
-                    }
-                };
-
-                info!("Telling X server to shut down");
-                match server.send_sigterm() {
-                    Ok(_) => {}
-                    Err(err) => error!("Failed to terminate X11. Reason: {err}"),
-                }
-
-                info!("Waiting for X server");
-                match server.wait() {
-                    Ok(_) => {}
-                    Err(err) => error!("Failed to wait for X11. Reason: {err}"),
-                }
-            }
             Self::Wayland(mut client) => match client.wait() {
                 Ok(exit_code) => info!("Client exited with exit code `{exit_code}`"),
                 Err(err) => error!("Failed to wait for client. Reason: {err}"),
@@ -164,7 +120,7 @@ impl PostLoginEnvironment {
     pub fn spawn(
         &self,
         user_info: &AuthUserInfo<'_>,
-        process_env: &mut EnvironmentContainer,
+        _process_env: &mut EnvironmentContainer,
         config: &Config,
     ) -> Result<SpawnedEnvironment, EnvironmentStartError> {
         let shell_login_flag = match config.shell_login_flag {
@@ -185,24 +141,6 @@ impl PostLoginEnvironment {
         client.arg("-c");
 
         match self {
-            PostLoginEnvironment::X { xinitrc_path, .. } => {
-                info!("Starting X11 session");
-
-                let server = setup_x(process_env, user_info, config)
-                    .map_err(EnvironmentStartError::XSetup)?;
-
-                client.arg(format!("{} {}", &config.x11.xsetup_path, xinitrc_path));
-
-                let client = match LemursChild::spawn(client, log_path) {
-                    Ok(child) => child,
-                    Err(err) => {
-                        error!("Failed to start X11 environment. Reason '{}'", err);
-                        return Err(EnvironmentStartError::XStartEnv);
-                    }
-                };
-
-                Ok(SpawnedEnvironment::X11 { server, client })
-            }
             PostLoginEnvironment::Wayland { script_path, .. } => {
                 info!("Starting Wayland session");
 
@@ -300,35 +238,6 @@ pub fn get_envs(config: &Config) -> Vec<(String, PostLoginEnvironment)> {
     // NOTE: Maybe we can do something smart with `with_capacity` here.
     let mut envs = Vec::new();
 
-    match fs::read_dir(&config.x11.xsessions_path) {
-        Ok(paths) => {
-            for path in paths {
-                let Ok(path) = path else {
-                    continue;
-                };
-
-                let path = path.path();
-
-                match parse_desktop_entry(&path, config) {
-                    Ok((name, exec)) => {
-                        info!("Added environment '{name}' from xsessions");
-                        envs.push((
-                            name.clone(),
-                            PostLoginEnvironment::X {
-                                xinitrc_path: exec,
-                                env_name: name,
-                            },
-                        ));
-                    }
-                    Err(err) => warn!("Skipping '{}', because {err}", path.display()),
-                }
-            }
-        }
-        Err(err) => {
-            warn!("Failed to read from the xsessions folder '{err}'",);
-        }
-    }
-
     match fs::read_dir(&config.wayland.wayland_sessions_path) {
         Ok(paths) => {
             for path in paths {
@@ -355,55 +264,6 @@ pub fn get_envs(config: &Config) -> Vec<(String, PostLoginEnvironment)> {
         }
         Err(err) => {
             warn!("Failed to read from the wayland sessions folder '{err}'",);
-        }
-    }
-
-    match fs::read_dir(&config.x11.scripts_path) {
-        Ok(paths) => {
-            for path in paths {
-                if let Ok(path) = path {
-                    let file_name = path.file_name().into_string();
-
-                    if let Ok(file_name) = file_name {
-                        if let Ok(metadata) = path.metadata() {
-                            if std::os::unix::fs::MetadataExt::mode(&metadata) & 0o111 == 0 {
-                                warn!(
-                                    "'{file_name}' is not executable and therefore not added as an environment",
-                                );
-
-                                continue;
-                            }
-                        }
-
-                        info!("Added environment '{file_name}' from lemurs x11 scripts");
-                        envs.push((
-                            file_name.clone(),
-                            PostLoginEnvironment::X {
-                                xinitrc_path: match path.path().to_str() {
-                                    Some(p) => p.to_string(),
-                                    None => {
-                                        warn!(
-                                    "Skipped item because it was impossible to convert to string"
-                                );
-                                        continue;
-                                    }
-                                },
-                                env_name: file_name.clone(),
-                            },
-                        ));
-                    } else {
-                        warn!("Unable to convert OSString to String");
-                    }
-                } else {
-                    warn!("Ignored errorinous path: '{}'", path.unwrap_err());
-                }
-            }
-        }
-        Err(_) => {
-            warn!(
-                "Failed to read from the X folder '{}'",
-                config.x11.scripts_path
-            );
         }
     }
 
@@ -467,3 +327,5 @@ pub fn get_envs(config: &Config) -> Vec<(String, PostLoginEnvironment)> {
 
     envs
 }
+#[cfg(test)]
+mod tests;

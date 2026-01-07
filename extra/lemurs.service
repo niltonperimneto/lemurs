@@ -9,7 +9,8 @@ StandardInput=tty
 TTYPath=/dev/tty2
 TTYReset=yes
 TTYVHangup=yes
-Type=idle
+Type=notify
+NotifyAccess=all
 
 [Install]
 Alias=display-manager.service

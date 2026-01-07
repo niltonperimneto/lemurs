@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::config::{Config, FocusBehaviour, SwitcherVisibility};
 use crate::info_caching::{get_cached_information, set_cache};
 use crate::post_login::PostLoginEnvironment;
-use crate::{start_session, Hooks, StartSessionError};
+use crate::{auth::try_auth, auth::AuthUserInfo, auth::AuthenticationError};
 use status_message::StatusMessage;
 
 use crossterm::cursor::MoveTo;
@@ -158,11 +158,17 @@ impl InputMode {
     }
 }
 
+pub enum LoginAction<'a> {
+    None,
+    Launch(AuthUserInfo<'a>, PostLoginEnvironment),
+}
+
 enum UIThreadRequest {
     Redraw,
     DisableTui,
-    EnableTui,
     StopDrawing,
+    // We use 'static here to send across channel, but we will transmute it back to 'a
+    LoginSuccess(AuthUserInfo<'static>, PostLoginEnvironment),
 }
 
 #[derive(Clone)]
@@ -235,7 +241,7 @@ pub struct LoginForm {
     widgets: Widgets,
 
     /// The configuration for the app
-    config: Config,
+    config: Arc<Config>,
 }
 
 // Trait for backends that support enabling/disabling the UI (entering/leaving raw mode/alternate screen)
@@ -309,7 +315,7 @@ impl LoginForm {
         }
     }
 
-    pub fn new(config: Config, preview: bool) -> LoginForm {
+    pub fn new(config: Arc<Config>, preview: bool) -> LoginForm {
         LoginForm {
             preview,
             widgets: Widgets {
@@ -348,14 +354,16 @@ impl LoginForm {
     }
 }
 
-
-
 // ... existing LoginForm struct ...
 
 impl LoginForm {
     // ... existing methods ...
 
-    pub fn run<B: LoginBackend>(self, terminal: &mut Terminal<B>) -> io::Result<()> {
+    pub fn run<'a, B: LoginBackend>(
+        self,
+        terminal: &mut Terminal<B>,
+        pam_service: &'a str,
+    ) -> io::Result<LoginAction<'a>> {
         terminal.backend_mut().enable_ui()?;
         self.load_cache();
         let input_mode = LoginFormInputMode::new(match self.config.focus_behaviour {
@@ -386,12 +394,6 @@ impl LoginForm {
             FocusBehaviour::Password => InputMode::Password,
         });
         let status_message = LoginFormStatusMessage::new();
-        let background = self.widgets.background.clone();
-        let panel = self.widgets.panel.clone();
-        let key_menu = self.widgets.key_menu.clone();
-        let environment = self.widgets.environment.clone();
-        let username = self.widgets.username.clone();
-        let password = self.widgets.password.clone();
         let panel_position = self.config.panel.position.clone();
 
         // Initial draw
@@ -400,12 +402,7 @@ impl LoginForm {
             login_form_render(
                 f,
                 layout,
-                background.clone(),
-                panel.clone(),
-                key_menu.clone(),
-                environment.clone(),
-                username.clone(),
-                password.clone(),
+                &self.widgets,
                 input_mode.get(),
                 status_message.get(),
             );
@@ -420,14 +417,15 @@ impl LoginForm {
         let event_status_message = status_message.clone();
 
         let (req_send_channel, req_recv_channel) = channel();
-        
+
         let widgets = self.widgets.clone();
         let config = self.config.clone();
         let preview = self.preview;
-        let myself_clone = self.clone(); // Need to clone self for the thread? self is consumed. 
-        // Actually, run(self) consumes self.
-        // We need to move logic into thread. 
-        
+        let myself_clone = self.clone();
+        // Transmute pam_service to static to allow it to be moved into the thread.
+        // We know it actually lives as long as 'a (main), which outlives this function scope.
+        let pam_service_static: &'static str = unsafe { std::mem::transmute(pam_service) };
+
         std::thread::spawn(move || {
             let mut switcher_hidden = widgets
                 .environment
@@ -458,21 +456,8 @@ impl LoginForm {
                 // Disable the rendering of the login manager
                 send_ui_request(UIThreadRequest::DisableTui);
             };
-            let pre_return = || {
-                // Enable the rendering of the login manager
-                send_ui_request(UIThreadRequest::EnableTui);
 
-                status_message.clear();
-                send_ui_request(UIThreadRequest::Redraw);
-            };
-
-            let hooks = Hooks {
-                pre_validate: None,
-                pre_auth: Some(&pre_auth),
-                pre_environment: Some(&pre_environment),
-                pre_wait: None,
-                pre_return: Some(&pre_return),
-            };
+            // Hooks struct removed as we call them directly now
 
             loop {
                 // NOTE: event::read() is blocking and uses Crossterm.
@@ -498,7 +483,7 @@ impl LoginForm {
                                     widgets.get_environment().map(|(_, content)| content);
                                 let username = widgets.get_username();
                                 let password = widgets.get_password();
-                                let config = config.clone();
+                                let _config = config.clone();
 
                                 let Some(post_login_env) = environment else {
                                     status_message.set(ErrorStatusMessage::NoGraphicalEnvironment);
@@ -506,28 +491,30 @@ impl LoginForm {
                                     continue;
                                 };
 
-                                match start_session(
-                                    &username,
-                                    &password,
-                                    &post_login_env,
-                                    &hooks,
-                                    &config,
-                                ) {
-                                    Ok(()) => {}
-                                    Err(StartSessionError::AuthenticationError(err)) => {
-                                        status_message
-                                            .set(ErrorStatusMessage::AuthenticationError(err));
+                                pre_auth(); // Call hook
+                                match try_auth(&username, &password, pam_service_static) {
+                                    Ok(auth_info) => {
+                                        pre_environment(); // Call hook
+                                                           // Transmute auth_info to 'static to send over channel
+                                        let auth_info_static: AuthUserInfo<'static> =
+                                            unsafe { std::mem::transmute(auth_info) };
+                                        send_ui_request(UIThreadRequest::LoginSuccess(
+                                            auth_info_static,
+                                            post_login_env,
+                                        ));
+                                    }
+                                    Err(AuthenticationError::PamService(err)) => {
+                                        error!("PAM Service error: {}", err);
+                                        status_message.set(
+                                            ErrorStatusMessage::AuthenticationError(
+                                                AuthenticationError::PamService(err),
+                                            ),
+                                        );
                                         send_ui_request(UIThreadRequest::Redraw);
                                     }
-                                    Err(StartSessionError::EnvironmentStartError(err)) => {
-                                        error!(
-                                            "Starting post-login environment failed. Reason: '{}'",
-                                            err
-                                        );
-                                        send_ui_request(UIThreadRequest::EnableTui);
-
+                                    Err(err) => {
                                         status_message
-                                            .set(ErrorStatusMessage::FailedGraphicalEnvironment);
+                                            .set(ErrorStatusMessage::AuthenticationError(err));
                                         send_ui_request(UIThreadRequest::Redraw);
                                     }
                                 }
@@ -551,7 +538,8 @@ impl LoginForm {
                         (KeyCode::Esc, InputMode::Normal, _) => {
                             if preview {
                                 info!("Pressed escape in preview mode to exit the application");
-                                if let Err(e) = req_send_channel.send(UIThreadRequest::StopDrawing) {
+                                if let Err(e) = req_send_channel.send(UIThreadRequest::StopDrawing)
+                                {
                                     warn!("Failed to send StopDrawing request: {:?}", e);
                                 }
                             }
@@ -580,9 +568,7 @@ impl LoginForm {
                         // widget.
                         (k, mode, modifiers) => {
                             let status_message_opt = match mode {
-                                InputMode::Switcher => {
-                                    widgets.environment_guard().key_press(k)
-                                }
+                                InputMode::Switcher => widgets.environment_guard().key_press(k),
                                 InputMode::Username => {
                                     widgets.username_guard().key_press(k, modifiers)
                                 }
@@ -610,17 +596,13 @@ impl LoginForm {
         while let Ok(request) = req_recv_channel.recv() {
             match request {
                 UIThreadRequest::Redraw => {
+                    let inputs_widgets = &self.widgets;
                     let draw_action = terminal.draw(|f| {
                         let layout = Chunks::new(f, panel_position.clone());
                         login_form_render(
                             f,
                             layout,
-                            background.clone(),
-                            panel.clone(),
-                            key_menu.clone(),
-                            environment.clone(),
-                            username.clone(),
-                            password.clone(),
+                            inputs_widgets,
                             input_mode.get(),
                             status_message.get(),
                         );
@@ -633,66 +615,43 @@ impl LoginForm {
                 UIThreadRequest::DisableTui => {
                     terminal.backend_mut().disable_ui()?;
                 }
-                UIThreadRequest::EnableTui => {
-                    terminal.backend_mut().enable_ui()?;
-                    terminal.clear()?;
+                UIThreadRequest::LoginSuccess(info, env) => {
+                    let info_a: AuthUserInfo<'a> = unsafe { std::mem::transmute(info) };
+                    return Ok(LoginAction::Launch(info_a, env));
                 }
                 _ => break,
             }
         }
 
-        Ok(())
+        Ok(LoginAction::None)
     }
 }
 
 fn login_form_render(
     frame: &mut Frame,
     chunks: Chunks,
-    background: BackgroundWidget,
-    panel: PanelWidget,
-    key_menu: KeyMenuWidget,
-    environment: Arc<Mutex<SwitcherWidget<PostLoginEnvironment>>>,
-    username: Arc<Mutex<InputFieldWidget>>,
-    password: Arc<Mutex<InputFieldWidget>>,
+    widgets: &Widgets,
     input_mode: InputMode,
     status_message: Option<StatusMessage>,
 ) {
-    background.render(frame);
-    panel.render(frame, chunks.panel_root);
-    key_menu.render(frame, chunks.key_menu);
-    environment
-        .lock()
-        .unwrap_or_else(|err| {
-            error!("Failed to lock post-login environment. Reason: {}", err);
-            std::process::exit(1);
-        })
-        .render(
-            frame,
-            chunks.switcher,
-            matches!(input_mode, InputMode::Switcher),
-        );
-    username
-        .lock()
-        .unwrap_or_else(|err| {
-            error!("Failed to lock username. Reason: {}", err);
-            std::process::exit(1);
-        })
-        .render(
-            frame,
-            chunks.username_field,
-            matches!(input_mode, InputMode::Username),
-        );
-    password
-        .lock()
-        .unwrap_or_else(|err| {
-            error!("Failed to lock password. Reason: {}", err);
-            std::process::exit(1);
-        })
-        .render(
-            frame,
-            chunks.password_field,
-            matches!(input_mode, InputMode::Password),
-        );
+    widgets.background.render(frame);
+    widgets.panel.render(frame, chunks.panel_root);
+    widgets.key_menu.render(frame, chunks.key_menu);
+    widgets.environment_guard().render(
+        frame,
+        chunks.switcher,
+        matches!(input_mode, InputMode::Switcher),
+    );
+    widgets.username_guard().render(
+        frame,
+        chunks.username_field,
+        matches!(input_mode, InputMode::Username),
+    );
+    widgets.password_guard().render(
+        frame,
+        chunks.password_field,
+        matches!(input_mode, InputMode::Password),
+    );
 
     // Display Status Message
     StatusMessage::render(status_message, frame, chunks.status_message);

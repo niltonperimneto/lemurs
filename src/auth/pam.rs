@@ -8,7 +8,7 @@ use uzers::os::unix::UserExt;
 use crate::auth::AuthUserInfo;
 
 /// All the different errors that can occur during PAM opening an authenticated session
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum AuthenticationError {
     PamService(String),
     AccountValidation,
@@ -48,7 +48,9 @@ pub fn open_session<'a>(
     // Try accessing conversation directly. If private, check for getter.
     // Given the lack of documentation, I'm guessing field 'conversation' or 'handler'.
     // Use `conversation_mut` method.
-    client.conversation_mut().set_credentials(username, password);
+    client
+        .conversation_mut()
+        .set_credentials(username, password);
 
     info!("Gotten Client");
 
