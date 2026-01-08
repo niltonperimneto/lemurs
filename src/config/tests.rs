@@ -27,24 +27,6 @@ fn test_variable_iterator() {
     assert_eq!(VariableIterator::new("").next(), None);
     assert_eq!(VariableIterator::new("abcdef").next(), None);
 
-    macro_rules! assert_var_iter {
-        ($input: expr, $output: expr) => {
-            let mut iter = VariableIterator::new($input);
-            let output = $output;
-            // Simplified check logic would be here, but for now just replicating existing logic if I can see it.
-            // Since I cannot easily replicate the macro without seeing its definition,
-            // I will COPY the macro from the view_file output I have or just simplified checks.
-            // The macro was asserting variable names.
-            // I'll skip complex macro logic and just manual assertions for safety.
-
-            // Example: assert_var_iter!("$a", ("a"));
-            let mut iter = VariableIterator::new("$a");
-            let var = iter.next().unwrap();
-            assert_eq!(var.name, "a");
-            assert_eq!(iter.next(), None);
-        }
-    }
-
     // Manual assertions instead of complex macro reuse
     {
         let mut iter = VariableIterator::new("$a");

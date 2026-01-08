@@ -5,67 +5,58 @@ pub struct UtmpxSession {
 
 #[cfg(target_env = "gnu")]
 pub fn add_utmpx_entry(username: &str, tty: u8, pid: u32) -> UtmpxSession {
-    log::info!("Adding UTMPX record");
+    log::info!(
+        "Adding UTMPX record for user '{}' on tty '{}'",
+        username,
+        tty
+    );
 
-    // Check the MAN page for utmp for more information
-    // `man utmp`
-    //
-    // https://man7.org/linux/man-pages/man0/utmpx.h.0p.html
-    // https://github.com/fairyglade/ly/blob/master/src/login.c
     let entry = {
-        // SAFETY: None of the fields in libc::utmpx have a drop implementation.
+        // SAFETY: libc::utmpx is a C struct with no Rust destructors.
+        // using zeroed() is standard for initializing C structs.
         let mut s: libc::utmpx = unsafe { std::mem::zeroed() };
-
-        // ut_line    --- Device name of tty - "/dev/"
-        // ut_id      --- Terminal name suffix
-        // ut_user    --- Username
-        // ut_host    --- Hostname for remote login, or kernel version for run-level messages
-        // ut_exit    --- Exit status of a process marked as DEAD_PROCESS; not used by Linux init(1)
-        // ut_session --- Session ID (getsid(2)) used for windowing
-        // ut_tv {    --- Time entry was made
-        //     tv_sec     --- Seconds
-        //     tv_usec    --- Microseconds
-        // }
-        // ut_addr_v6 --- Internet address of remote
 
         s.ut_type = libc::USER_PROCESS;
         s.ut_pid = pid as libc::pid_t;
 
-        for (i, b) in username.as_bytes().iter().take(32).enumerate() {
+        // Safely copy username (truncated to fits in ut_user)
+        let user_bytes = username.as_bytes();
+        let user_len = user_bytes.len().min(s.ut_user.len());
+        for (i, b) in user_bytes.iter().take(user_len).enumerate() {
             s.ut_user[i] = *b as libc::c_char;
         }
 
-        if tty > 12 {
-            log::error!("Invalid TTY");
-            std::process::exit(1);
+        // Properly format TTY string (e.g., "tty1", "tty12")
+        let tty_str = format!("tty{}", tty);
+        let tty_bytes = tty_str.as_bytes();
+
+        // ut_line (Device name, e.g., "tty1")
+        let line_len = tty_bytes.len().min(s.ut_line.len());
+        for (i, b) in tty_bytes.iter().take(line_len).enumerate() {
+            s.ut_line[i] = *b as libc::c_char;
         }
-        let tty_c_char = (b'0' + tty) as libc::c_char;
 
-        s.ut_line[0] = b't' as libc::c_char;
-        s.ut_line[1] = b't' as libc::c_char;
-        s.ut_line[2] = b'y' as libc::c_char;
-        s.ut_line[3] = tty_c_char;
+        // ut_id (Terminal name suffix, e.g., "1", "12")
+        // Usually just the number for TTYs
+        let id_str = format!("{}", tty);
+        let id_bytes = id_str.as_bytes();
+        let id_len = id_bytes.len().min(s.ut_id.len());
+        for (i, b) in id_bytes.iter().take(id_len).enumerate() {
+            s.ut_id[i] = *b as libc::c_char;
+        }
 
-        s.ut_id[0] = tty_c_char;
+        // Set timestamp
+        if let Ok(duration) =
+            std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH)
+        {
+            s.ut_tv.tv_sec = duration.as_secs() as i32;
+            s.ut_tv.tv_usec = duration.subsec_micros() as i32;
+        } else {
+            log::error!("System time is before UNIX EPOCH!");
+        }
 
-        use std::time::SystemTime;
-
-        let epoch_duration = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_else(|_| {
-                log::error!("Invalid System Time");
-                std::process::exit(1);
-            })
-            .as_micros();
-
-        s.ut_tv.tv_sec = (epoch_duration / 1_000_000).try_into().unwrap_or_else(|_| {
-            log::error!("Invalid System Time (TV_SEC Overflow)");
-            std::process::exit(1);
-        });
-        s.ut_tv.tv_usec = (epoch_duration % 1_000_000).try_into().unwrap_or_else(|_| {
-            log::error!("Invalid System Time (TV_USEC Overflow)");
-            std::process::exit(1);
-        });
+        // Set address (optional, but good practice to clear/set for local)
+        // For local TTY, ut_addr_v6 is usually 0.
 
         s
     };
@@ -73,6 +64,7 @@ pub fn add_utmpx_entry(username: &str, tty: u8, pid: u32) -> UtmpxSession {
     unsafe {
         libc::setutxent();
         libc::pututxline(&entry as *const libc::utmpx);
+        libc::endutxent(); // Always close properly
     };
 
     log::info!("Added UTMPX record");
@@ -83,28 +75,39 @@ pub fn add_utmpx_entry(username: &str, tty: u8, pid: u32) -> UtmpxSession {
 #[cfg(not(target_env = "gnu"))]
 pub fn add_utmpx_entry(_username: &str, _tty: u8, _pid: u32) -> UtmpxSession {
     log::info!("Incompatible platform for UTMPX. Skipping...");
-
     UtmpxSession {}
 }
 
 #[cfg(target_env = "gnu")]
 impl Drop for UtmpxSession {
     fn drop(&mut self) {
-        let entry = &mut self.session;
-
         log::info!("Removing UTMPX record");
 
-        entry.ut_type = libc::DEAD_PROCESS;
+        // Mark as dead process
+        self.session.ut_type = libc::DEAD_PROCESS;
 
-        entry.ut_line = <[libc::c_char; 32]>::default();
-        entry.ut_user = <[libc::c_char; 32]>::default();
-
-        entry.ut_tv.tv_usec = 0;
-        entry.ut_tv.tv_sec = 0;
+        // Zero out user and host fields for privacy/cleanup
+        // We keep ut_line and ut_id so the system knows WHICH entry to update.
+        // "pututxline() searches for ... a record with the same ut_type ... matching ut_id"
+        // Actually, for DEAD_PROCESS, it matches by ut_id.
 
         unsafe {
+            // libc::memset of ut_user to 0
+            std::ptr::write_bytes(
+                self.session.ut_user.as_mut_ptr(),
+                0,
+                self.session.ut_user.len(),
+            );
+            // Updates timestamp to now
+            if let Ok(duration) =
+                std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH)
+            {
+                self.session.ut_tv.tv_sec = duration.as_secs() as i32;
+                self.session.ut_tv.tv_usec = duration.subsec_micros() as i32;
+            }
+
             libc::setutxent();
-            libc::pututxline(entry as *const libc::utmpx);
+            libc::pututxline(&self.session as *const libc::utmpx);
             libc::endutxent();
         }
     }

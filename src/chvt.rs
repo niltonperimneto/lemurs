@@ -11,7 +11,7 @@ use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
 use std::error::Error;
 use std::fmt::{self, Debug, Display, Formatter};
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 
 const VT_ACTIVATE: RequestType = 0x5606;
 const VT_WAITACTIVE: RequestType = 0x5607;
@@ -34,9 +34,7 @@ pub enum ChvtError {
 impl Error for ChvtError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Activate(e)
-            | Self::WaitActive(e)
-            | Self::OpenConsole(e) => Some(e),
+            Self::Activate(e) | Self::WaitActive(e) | Self::OpenConsole(e) => Some(e),
             _ => None,
         }
     }
@@ -84,15 +82,13 @@ fn open_a_console(filename: &str) -> Result<OwnedFd, ChvtError> {
     for oflag in [OFlag::O_RDWR, OFlag::O_RDONLY, OFlag::O_WRONLY] {
         match fcntl::open(filename, oflag, Mode::empty()) {
             Ok(fd) => {
-                // Check if it is a console before wrapping in OwnedFd logic purely
-                // But we already have a raw fd.
-                if !is_a_console(fd) {
-                    let _ = nix::unistd::close(fd);
+                // Check if it is a console
+                if !is_a_console(fd.as_raw_fd()) {
+                    // fd is OwnedFd, it closes automatically on drop
                     return Err(ChvtError::NotAConsole);
                 }
 
-                // Safety: We just opened this FD, so we own it.
-                return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
+                return Ok(fd);
             }
             Err(Errno::EACCES) => continue,
             _ => break,
@@ -106,7 +102,7 @@ fn open_a_console(filename: &str) -> Result<OwnedFd, ChvtError> {
 fn get_console_fd() -> Result<ConsoleFd, ChvtError> {
     // Try opening new paths first
     let paths = ["/dev/tty", "/dev/tty0", "/dev/vc/0", "/dev/console"];
-    
+
     for path in paths {
         if let Ok(fd) = open_a_console(path) {
             return Ok(ConsoleFd::Owned(fd));
@@ -129,15 +125,19 @@ pub fn chvt(ttynum: i32) -> Result<(), ChvtError> {
 
     let activate = unsafe { libc::ioctl(fd, VT_ACTIVATE, ttynum as c_int) };
     if activate < 0 {
-        return Err(ChvtError::Activate(Errno::from_raw(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))));
+        return Err(ChvtError::Activate(Errno::from_raw(
+            std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+        )));
     }
 
     let wait = unsafe { libc::ioctl(fd, VT_WAITACTIVE, ttynum) };
     if wait < 0 {
-        return Err(ChvtError::WaitActive(Errno::from_raw(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))));
+        return Err(ChvtError::WaitActive(Errno::from_raw(
+            std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+        )));
     }
 
-    // ConsoleFd is dropped here. 
+    // ConsoleFd is dropped here.
     // If Owned, it calls close(). If Shared, it does nothing.
     // This fixes the bug where we closed stdin/stdout.
     Ok(())

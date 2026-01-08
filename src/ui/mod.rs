@@ -9,6 +9,8 @@ use crate::config::{Config, FocusBehaviour, SwitcherVisibility};
 use crate::info_caching::{get_cached_information, set_cache};
 use crate::post_login::PostLoginEnvironment;
 use crate::{auth::try_auth, auth::AuthUserInfo, auth::AuthenticationError};
+use secrecy::{ExposeSecret, SecretString};
+
 use status_message::StatusMessage;
 
 use crossterm::cursor::MoveTo;
@@ -158,18 +160,22 @@ impl InputMode {
     }
 }
 
-pub enum LoginAction<'a> {
+pub enum LoginAction {
     None,
-    Launch(AuthUserInfo<'a>, PostLoginEnvironment),
+    Launch(AuthUserInfo, PostLoginEnvironment),
 }
 
 enum UIThreadRequest {
     Redraw,
     DisableTui,
     StopDrawing,
-    // We use 'static here to send across channel, but we will transmute it back to 'a
-    LoginSuccess(AuthUserInfo<'static>, PostLoginEnvironment),
+    LoginSuccess(AuthUserInfo, PostLoginEnvironment),
 }
+
+// ... (omitting lines between 172-498 for brevity in thinking, but tool requires contiguous? No, I can replace just the relevant blocks)
+// I will use multiple replace chunks in next call if needed, but `replace_file_content` is single chunk.
+// I'll do this in multiple calls or careful chunking.
+// Let's replace the Enum definitions first.
 
 #[derive(Clone)]
 struct Widgets {
@@ -219,12 +225,12 @@ impl Widgets {
         self.environment_guard().try_select(title);
     }
     fn get_username(&self) -> String {
-        self.username_guard().get_content()
+        self.username_guard().get_content().expose_secret().clone()
     }
     fn set_username(&self, content: &str) {
         self.username_guard().set_content(content)
     }
-    fn get_password(&self) -> String {
+    fn get_password(&self) -> SecretString {
         self.password_guard().get_content()
     }
     fn clear_password(&self) {
@@ -359,11 +365,11 @@ impl LoginForm {
 impl LoginForm {
     // ... existing methods ...
 
-    pub fn run<'a, B: LoginBackend>(
+    pub fn run<B: LoginBackend>(
         self,
         terminal: &mut Terminal<B>,
-        pam_service: &'a str,
-    ) -> io::Result<LoginAction<'a>> {
+        pam_service: String,
+    ) -> io::Result<LoginAction> {
         terminal.backend_mut().enable_ui()?;
         self.load_cache();
         let input_mode = LoginFormInputMode::new(match self.config.focus_behaviour {
@@ -424,7 +430,6 @@ impl LoginForm {
         let myself_clone = self.clone();
         // Transmute pam_service to static to allow it to be moved into the thread.
         // We know it actually lives as long as 'a (main), which outlives this function scope.
-        let pam_service_static: &'static str = unsafe { std::mem::transmute(pam_service) };
 
         std::thread::spawn(move || {
             let mut switcher_hidden = widgets
@@ -456,8 +461,6 @@ impl LoginForm {
                 // Disable the rendering of the login manager
                 send_ui_request(UIThreadRequest::DisableTui);
             };
-
-            // Hooks struct removed as we call them directly now
 
             loop {
                 // NOTE: event::read() is blocking and uses Crossterm.
@@ -492,14 +495,11 @@ impl LoginForm {
                                 };
 
                                 pre_auth(); // Call hook
-                                match try_auth(&username, &password, pam_service_static) {
+                                match try_auth(&username, &password, &pam_service) {
                                     Ok(auth_info) => {
                                         pre_environment(); // Call hook
-                                                           // Transmute auth_info to 'static to send over channel
-                                        let auth_info_static: AuthUserInfo<'static> =
-                                            unsafe { std::mem::transmute(auth_info) };
                                         send_ui_request(UIThreadRequest::LoginSuccess(
-                                            auth_info_static,
+                                            auth_info,
                                             post_login_env,
                                         ));
                                     }
@@ -616,8 +616,7 @@ impl LoginForm {
                     terminal.backend_mut().disable_ui()?;
                 }
                 UIThreadRequest::LoginSuccess(info, env) => {
-                    let info_a: AuthUserInfo<'a> = unsafe { std::mem::transmute(info) };
-                    return Ok(LoginAction::Launch(info_a, env));
+                    return Ok(LoginAction::Launch(info, env));
                 }
                 _ => break,
             }

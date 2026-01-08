@@ -2,10 +2,11 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::{
     layout::Rect,
     style::Style,
-    Frame,
     text::Span,
     widgets::{Block, Borders, Paragraph},
+    Frame,
 };
+use secrecy::SecretString;
 use std::borrow::Cow;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -289,12 +290,7 @@ impl InputFieldWidget {
         area
     }
 
-    pub fn render(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        is_focused: bool,
-    ) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, is_focused: bool) {
         let area = self.constraint_area(area);
         let block = self.get_block(is_focused);
         let inner = block.inner(area);
@@ -345,8 +341,8 @@ impl InputFieldWidget {
     }
 
     /// Get the real content of the input field
-    pub fn get_content(&self) -> String {
-        self.content.clone()
+    pub fn get_content(&self) -> SecretString {
+        SecretString::new(self.content.clone())
     }
 
     pub fn set_content(&mut self, content: &str) {

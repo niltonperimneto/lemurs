@@ -200,7 +200,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         // We run the actual LoginForm now!
                         let login_form = ui::LoginForm::new(config.clone(), true); // true = preview mode
 
-                        if let Err(e) = login_form.run(&mut terminal, &config.pam_service) {
+                        if let Err(e) = login_form.run(&mut terminal, config.pam_service.clone()) {
                             eprintln!("Error running login form: {:?}", e);
                         }
 
@@ -288,7 +288,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // Ensure sufficient stack space (32KB red zone, 1MB growth)
         let action = stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
-            login_form.run(&mut terminal, &config.pam_service)
+            login_form.run(&mut terminal, config.pam_service.clone())
         })?;
 
         // Drop the terminal and backend to release DRM Master!
@@ -344,7 +344,7 @@ impl From<AuthenticationError> for StartSessionError {
 }
 
 fn start_session_with_auth(
-    auth_session: AuthUserInfo<'_>,
+    auth_session: AuthUserInfo,
     post_login_env: &PostLoginEnvironment,
     hooks: &Hooks<'_>,
     config: &Config,
@@ -358,7 +358,7 @@ fn start_session_with_auth(
         pre_validate_hook();
     }
 
-    let mut process_env = EnvironmentContainer::take_snapshot();
+    let mut process_env = EnvironmentContainer::new();
 
     if let Some(pre_auth_hook) = hooks.pre_auth {
         pre_auth_hook();
@@ -396,7 +396,7 @@ fn start_session_with_auth(
     let pid = spawned_environment.pid();
 
     let utmpx_session = add_utmpx_entry(&auth_session.username, tty, pid);
-    drop(process_env);
+    // process_env is dropped automatically, no side effects
 
     info!("Waiting for environment to terminate");
 

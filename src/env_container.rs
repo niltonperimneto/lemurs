@@ -1,119 +1,79 @@
 use std::collections::HashMap;
 use std::env;
-use std::marker::PhantomData;
+use std::process::Command;
 
-use log::{error, info};
+use log::{debug, info};
 use secrecy::{ExposeSecret, SecretString};
 
-/// The `EnvironmentContainer` is abstract the process environment and allows for restoring to an
-/// earlier state
-#[derive(Debug)]
+/// The `EnvironmentContainer` abstracts the process environment.
+///
+/// It maintains an internal map of variables intended for the child process,
+/// allowing secure management (via `SecretString`) without modifying the global
+/// `lemurs` process environment.
+#[derive(Debug, Clone)]
 pub struct EnvironmentContainer {
-    snapshot: HashMap<String, String>,
-    snapshot_pwd: String,
-    owned: HashMap<String, SecretString>,
-
-    // Ensure that this is not send.
-    _no_send: PhantomData<std::sync::MutexGuard<'static, ()>>,
+    vars: HashMap<String, SecretString>,
+    working_dir: String,
 }
 
 impl EnvironmentContainer {
-    pub fn take_snapshot() -> Self {
-        let pwd = match env::current_dir().map(|pathbuf| pathbuf.to_str().map(str::to_string)) {
-            Ok(Some(s)) => s,
-            Ok(None) | Err(_) => {
-                error!("Could not find the working directory when taking snapshot");
-                String::from("/")
-            }
-        };
+    /// Creates a new container initialized with the current system environment.
+    pub fn new() -> Self {
+        let vars = env::vars()
+            .map(|(k, v)| (k, SecretString::new(v)))
+            .collect();
 
-        Self {
-            snapshot: env::vars().collect::<HashMap<String, String>>(),
-            owned: HashMap::default(),
-            snapshot_pwd: pwd,
+        let working_dir = env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "/".to_string());
 
-            _no_send: Default::default(),
-        }
+        Self { vars, working_dir }
     }
 
-    /// Set an environment variable and own the value
+    /// Set an environment variable. Overwrites if exists.
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
         let key = key.into();
-        let value = SecretString::new(value.into());
-
-        // SAFETY: We only even call this from one thread.
-        unsafe { env::set_var(&key, value.expose_secret()) };
-
-        info!("Set environment variable '{}'", key);
-
-        self.owned.insert(key, value);
+        let value = value.into();
+        debug!("Setting environment variable '{}'", key);
+        self.vars.insert(key, SecretString::new(value));
     }
 
-    /// Set an environment variable if it is not already set
-    ///
-    /// If the variable was already set, then the [`EnvironmentContainer`] considers the value as
-    /// one of its own.
-    pub fn set_or_own(&mut self, key: impl Into<String>, value: impl Into<String>) {
+    /// Set an environment variable only if it is NOT already set.
+    pub fn set_or_preserve(&mut self, key: impl Into<String>, value: impl Into<String>) {
         let key = key.into();
-        if let Ok(existing_value) = env::var(&key) {
-            info!(
-                "Skipped setting environment variable '{}'. It was already set",
-                key
-            );
-            self.owned.insert(key, SecretString::new(existing_value));
+        if self.vars.contains_key(&key) {
+            debug!("Skipping '{}': already set", key);
         } else {
-            self.set(key, value)
+            self.set(key, value);
         }
+    }
+
+    // Alias to match previous API name if needed, but `set_or_preserve` is clearer.
+    pub fn set_or_own(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.set_or_preserve(key, value);
     }
 
     pub fn remove_var(&mut self, key: &str) {
-        if env::var(key).is_ok() {
-            info!("Preemptively removed environment variable '{key}'",);
-
-            // SAFETY: We only even call this from one thread.
-            unsafe { env::remove_var(key) };
+        if self.vars.remove(key).is_some() {
+            debug!("Removed environment variable '{}'", key);
         }
     }
 
-    /// Sets the working directory
+    /// Sets the intended working directory for the session
     pub fn set_current_dir(&mut self, value: impl Into<String>) {
-        let value = value.into();
-
-        if env::set_current_dir(&value).is_ok() {
-            info!("Successfully changed working directory to {}!", value);
-        } else {
-            error!("Failed to change the working directory to {}", value);
-        }
-        self.snapshot_pwd = value;
+        self.working_dir = value.into();
     }
-}
 
-impl Drop for EnvironmentContainer {
-    fn drop(&mut self) {
-        // Remove all owned variables for which we have an accurate environment value
-        info!("Removing session environment variables");
-        for (key, value) in self.owned.iter() {
-            if env::var(key).as_ref().map(|s| s.as_str()) == Ok(value.expose_secret()) {
-                // SAFETY: We only even call this from one thread.
-                unsafe { env::remove_var(key) };
-            }
+    /// Applies the contained environment to a `Command`.
+    ///
+    /// This clears the Command's default environment and replaces it strictly
+    /// with the variables in this container.
+    pub fn apply_to_command(&self, command: &mut Command) {
+        command.env_clear();
+        for (key, val) in &self.vars {
+            command.env(key, val.expose_secret());
         }
-
-        // Restore all snapshot values for which disappeared
-        info!("Reverting to environment before session");
-        for (key, value) in self.snapshot.iter() {
-            if env::var(key).is_err() {
-                // SAFETY: We only even call this from one thread.
-                unsafe { env::set_var(key, value) };
-            }
-        }
-
-        info!("Reverting to environment before session");
-        if env::set_current_dir(&self.snapshot_pwd).is_err() {
-            error!(
-                "Failed to change the working directory back to {}",
-                &self.snapshot_pwd
-            );
-        }
+        command.current_dir(&self.working_dir);
+        info!("Applied environment to command (PWD: {})", self.working_dir);
     }
 }

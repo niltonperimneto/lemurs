@@ -60,12 +60,21 @@ impl Display for EnvironmentStartError {
 
 impl Error for EnvironmentStartError {}
 
-fn lower_command_permissions_to_user(
-    mut command: Command,
-    user_info: &AuthUserInfo<'_>,
-) -> Command {
+/// Configures a `Command` to drop privileges to the specified user.
+///
+/// # Security
+///
+/// This function executes the following sequence in the child process:
+/// 1. `setgroups`: Sets supplementary groups. This MUST be done first because `setuid` might revoke the permission to set groups.
+/// 2. `setgid`: Sets the primary GID.
+/// 3. `setuid`: Sets the UID (dropping root privileges).
+///
+/// If any of these steps fail, the child process will abort to prevent running with partial or incorrect privileges (especially root).
+fn lower_command_permissions_to_user(mut command: Command, user_info: &AuthUserInfo) -> Command {
     let uid = user_info.uid;
     let gid = user_info.primary_gid;
+
+    // Prepare groups strictly.
     let groups = user_info
         .all_gids
         .iter()
@@ -75,12 +84,34 @@ fn lower_command_permissions_to_user(
 
     unsafe {
         command.pre_exec(move || {
-            // NOTE: The order here is very vital, otherwise permission errors occur
-            // This is basically a copy of how the nightly standard library does it.
-            nix::unistd::setgroups(&groups)
-                .and(nix::unistd::setgid(Gid::from_raw(gid)))
-                .and(nix::unistd::setuid(Uid::from_raw(uid)))
-                .map_err(|err| err.into())
+            // We are now in the child process.
+            // Any failure here means we must NOT continue execution.
+
+            // 1. Set supplementary groups
+            nix::unistd::setgroups(&groups).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Failed to setgroups: {}", e),
+                )
+            })?;
+
+            // 2. Set primary GID
+            nix::unistd::setgid(Gid::from_raw(gid)).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Failed to setgid: {}", e),
+                )
+            })?;
+
+            // 3. Set UID (Irreversible drop of privileges if switching from root)
+            nix::unistd::setuid(Uid::from_raw(uid)).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Failed to setuid: {}", e),
+                )
+            })?;
+
+            Ok(())
         });
     }
 
@@ -119,7 +150,7 @@ impl SpawnedEnvironment {
 impl PostLoginEnvironment {
     pub fn spawn(
         &self,
-        user_info: &AuthUserInfo<'_>,
+        user_info: &AuthUserInfo,
         _process_env: &mut EnvironmentContainer,
         config: &Config,
     ) -> Result<SpawnedEnvironment, EnvironmentStartError> {
@@ -137,6 +168,9 @@ impl PostLoginEnvironment {
         if let Some(shell_login_flag) = shell_login_flag {
             client.arg(shell_login_flag);
         }
+
+        // Apply environment variables
+        _process_env.apply_to_command(&mut client);
 
         client.arg("-c");
 
@@ -235,94 +269,90 @@ fn parse_desktop_entry(path: &Path, _: &Config) -> Result<(String, String), Stri
 }
 
 pub fn get_envs(config: &Config) -> Vec<(String, PostLoginEnvironment)> {
-    // NOTE: Maybe we can do something smart with `with_capacity` here.
     let mut envs = Vec::new();
 
-    match fs::read_dir(&config.wayland.wayland_sessions_path) {
-        Ok(paths) => {
-            for path in paths {
-                let Ok(path) = path else {
+    // 0. Add Terminal (TTY Shell) at the top if configured
+    if config.environment_switcher.include_tty_shell {
+        envs.push(("Terminal".to_string(), PostLoginEnvironment::Shell));
+    }
+
+    // 1. Load Wayland Sessions (.desktop files)
+    if let Ok(paths) = fs::read_dir(&config.wayland.wayland_sessions_path) {
+        for path in paths.flatten() {
+            let path = path.path();
+            match parse_desktop_entry(&path, config) {
+                Ok((name, exec)) => {
+                    info!("Added environment '{name}' from wayland sessions");
+                    envs.push((
+                        name.clone(),
+                        PostLoginEnvironment::Wayland {
+                            script_path: exec,
+                            env_name: name,
+                        },
+                    ));
+                }
+                Err(err) => warn!("Skipping '{}': {}", path.display(), err),
+            }
+        }
+    } else {
+        warn!(
+            "Failed to read wayland sessions directory: '{}'",
+            config.wayland.wayland_sessions_path
+        );
+    }
+
+    // 2. Load Custom Wayland Scripts
+    if let Ok(paths) = fs::read_dir(&config.wayland.scripts_path) {
+        for entry in paths.flatten() {
+            let path = entry.path();
+
+            // Check for execution permission
+            let is_executable = match path.metadata() {
+                Ok(m) => (std::os::unix::fs::MetadataExt::mode(&m) & 0o111) != 0,
+                Err(_) => false,
+            };
+
+            if !is_executable {
+                warn!("Skipping '{}': Not executable", path.display());
+                continue;
+            }
+
+            let file_name = match path.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n.to_string(),
+                None => {
+                    warn!("Skipping '{}': Invalid UTF-8 filename", path.display());
                     continue;
-                };
-
-                let path = path.path();
-
-                match parse_desktop_entry(&path, config) {
-                    Ok((name, exec)) => {
-                        info!("Added environment '{name}' from wayland sessions");
-                        envs.push((
-                            name.clone(),
-                            PostLoginEnvironment::Wayland {
-                                script_path: exec,
-                                env_name: name,
-                            },
-                        ))
-                    }
-                    Err(err) => warn!("Skipping '{}', because {err}", path.display()),
                 }
-            }
+            };
+
+            let script_path = match path.to_str() {
+                Some(p) => p.to_string(),
+                None => {
+                    warn!("Skipping '{}': Invalid UTF-8 path", path.display());
+                    continue;
+                }
+            };
+
+            info!("Added environment '{file_name}' from scripts");
+            envs.push((
+                file_name.clone(),
+                PostLoginEnvironment::Wayland {
+                    script_path,
+                    env_name: file_name,
+                },
+            ));
         }
-        Err(err) => {
-            warn!("Failed to read from the wayland sessions folder '{err}'",);
-        }
+    } else {
+        warn!(
+            "Failed to read scripts directory: '{}'",
+            config.wayland.scripts_path
+        );
     }
 
-    match fs::read_dir(&config.wayland.scripts_path) {
-        Ok(paths) => {
-            for path in paths {
-                if let Ok(path) = path {
-                    let file_name = path.file_name().into_string();
-
-                    if let Ok(file_name) = file_name {
-                        if let Ok(metadata) = path.metadata() {
-                            if std::os::unix::fs::MetadataExt::mode(&metadata) & 0o111 == 0 {
-                                warn!(
-                                    "'{}' is not executable and therefore not added as an environment",
-                                    file_name
-                                );
-
-                                continue;
-                            }
-                        }
-
-                        info!("Added environment '{file_name}' from lemurs wayland scripts");
-                        envs.push((
-                            file_name.clone(),
-                            PostLoginEnvironment::Wayland {
-                                script_path: match path.path().to_str() {
-                                    Some(p) => p.to_string(),
-                                    None => {
-                                        warn!(
-                                    "Skipped item because it was impossible to convert to string"
-                                );
-                                        continue;
-                                    }
-                                },
-                                env_name: file_name.clone(),
-                            },
-                        ));
-                    } else {
-                        warn!("Unable to convert OSString to String");
-                    }
-                } else {
-                    warn!("Ignored errorinous path: '{}'", path.unwrap_err());
-                }
-            }
-        }
-        Err(_) => {
-            warn!(
-                "Failed to read from the wayland folder '{}'",
-                config.wayland.scripts_path
-            );
-        }
-    }
-
-    if envs.is_empty() || config.environment_switcher.include_tty_shell {
-        if envs.is_empty() {
-            info!("Added TTY SHELL because no other environments were found");
-        }
-
-        envs.push(("TTYSHELL".to_string(), PostLoginEnvironment::Shell));
+    // 3. Fallback: If no environments found (and TTY wasn't already added), add TTY Shell.
+    if envs.is_empty() {
+        info!("No environments found. Adding default Terminal (TTY Shell).");
+        envs.push(("Terminal".to_string(), PostLoginEnvironment::Shell));
     }
 
     envs
