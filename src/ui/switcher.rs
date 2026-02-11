@@ -3,12 +3,13 @@ use log::warn;
 use ratatui::{
     layout::{Alignment, Rect},
     style::Style,
-    Frame,
     text::{Line, Span, Text},
     widgets::{Block, Paragraph},
+    Frame,
 };
 
 use crate::config::{get_color, get_modifiers, SwitcherConfig, SwitcherVisibility};
+use crate::ui::status_message::ErrorStatusMessage;
 
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct SwitcherItem<T> {
@@ -273,12 +274,7 @@ impl<T> SwitcherWidget<T> {
         self.hidden
     }
 
-    pub fn render(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        is_focused: bool,
-    ) {
+    pub fn render(&self, frame: &mut Frame, area: Rect, is_focused: bool) {
         let Self {
             selector,
             config,
@@ -380,7 +376,7 @@ impl<T> SwitcherWidget<T> {
         frame.render_widget(widget, area);
     }
 
-    pub(crate) fn key_press(&mut self, key_code: KeyCode) -> Option<super::ErrorStatusMessage> {
+    pub(crate) fn key_press(&mut self, key_code: KeyCode) -> Option<ErrorStatusMessage> {
         match key_code {
             KeyCode::Left | KeyCode::Char('h') => {
                 self.left();

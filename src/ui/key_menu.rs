@@ -12,6 +12,8 @@ use crate::config::{
     SwitcherVisibility,
 };
 
+use crate::ui::status_message::ErrorStatusMessage;
+
 #[derive(Clone)]
 pub struct KeyMenuWidget {
     power_config: PowerControlConfig,
@@ -96,7 +98,7 @@ impl KeyMenuWidget {
         }
     }
 
-    pub(crate) fn key_press(&self, key_code: KeyCode) -> Option<super::ErrorStatusMessage> {
+    pub(crate) fn key_press(&self, key_code: KeyCode) -> Option<ErrorStatusMessage> {
         // TODO: Properly handle StdIn
         for power_control in self
             .power_config
@@ -114,7 +116,7 @@ impl KeyMenuWidget {
                 match cmd_status {
                     Err(err) => {
                         log::error!("Failed to execute shutdown command: {:?}", err);
-                        return Some(super::ErrorStatusMessage::FailedPowerControl(
+                        return Some(ErrorStatusMessage::FailedPowerControl(
                             power_control.hint.clone(),
                         ));
                     }
@@ -127,7 +129,7 @@ impl KeyMenuWidget {
                         log::error!("STDOUT:\n{:?}", stdout);
                         log::error!("STDERR:\n{:?}", stderr);
 
-                        return Some(super::ErrorStatusMessage::FailedPowerControl(
+                        return Some(ErrorStatusMessage::FailedPowerControl(
                             power_control.hint.clone(),
                         ));
                     }

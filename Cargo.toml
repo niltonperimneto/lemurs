@@ -66,6 +66,7 @@ rusttype = "0.9.3"
 sd-notify = "0.4"
 stacker = "0.1"
 pam-sys = "1.0.0-alpha5"
+chrono = "0.4.42"
 
 
 # The profile that 'cargo dist' will build with
@@ -74,7 +75,7 @@ inherits = "release"
 lto = "thin"
 
 [profile.release]
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 panic = "abort"
 strip = true

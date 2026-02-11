@@ -147,6 +147,16 @@ title = "Wow a Password :)"
 title_color = "white"
 ```
 
+## KWallet / Keyring Integration
+
+Lemurs fully supports auto-unlocking of Keyrings (like KWallet or GNOME Keyring) upon login. However, because Lemurs runs in a **TTY environment** (non-graphical), some PAM modules like `pam_kwallet5` will disable themselves by default.
+
+To ensure KWallet unlocks correctly, you must add the `force_run` parameter to your PAM configuration (usually `/etc/pam.d/lemurs`):
+
+```pam
+session optional pam_kwallet5.so auto_start force_run
+```
+
 ## Preview & Debugging
 
 Lemurs logs a lot of information of it running to a logging file. There are 3
@@ -185,17 +195,26 @@ want to tweak details for their own installation.
 |  |  |- mod.rs
 |  |  |- pam.rs
 |  |  |- utmpx.rs
+|  |- gui: Graphical backend implementations
+|  |  |- mod.rs
+|  |  |- backend.rs: Trait definition and Ratatui adapter
+|  |  |- kms.rs: KMS/DRM rendering implementation
 |  |- post_login: All logic after authentication
 |  |  |- mod.rs
 |  |  |- env_variables.rs: General environment variables settings
-|  |  |- x.rs: Logic concerning Xorg
 |  |- ui: TUI code
-|  |  |- mod.rs: UI calling logic, separated over 2 threads
+|  |  |- mod.rs: Module definitions
+|  |  |- app.rs: Main application logic and coordination
+|  |  |- renderer.rs: TUI rendering logic
+|  |  |- input_loop.rs: Event handling and authentication thread
+|  |  |- types.rs: Shared types and LoginBackend trait
+|  |  |- state.rs: Thread-safe state wrappers
+|  |  |- widgets_collection.rs: Widgets container
 |  |  |- chunks.rs: Division of the TUI screen
 |  |  |- background.rs: Background logic
 |  |  |- input_field.rs: TUI input field used for username and password
-|  |  |- panel.rs: Panel logic for speration between login information and background
-|  |  |- power_menu.rs: Shutdown and Reboot options UI
+|  |  |- panel.rs: Panel logic for separation between login information and background
+|  |  |- key_menu.rs: Power controls and Environment Switcher hints
 |  |  |- status_message.rs: UI for error and information messages
 |  |  |- switcher.rs: UI for environment switcher
 |- extra: Configuration and extra files needed

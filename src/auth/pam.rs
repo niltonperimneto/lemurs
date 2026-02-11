@@ -132,12 +132,17 @@ pub fn open_session(
     username: &str,
     password: &SecretString,
     pam_service: &str,
+    tty: &str,
 ) -> Result<AuthUserInfo, AuthenticationError> {
-    log::info!("Started opening session via PAM-SYS");
+    log::info!("Started opening session via PAM-SYS on {}", tty);
 
     let c_user = CString::new(username).map_err(|_| AuthenticationError::UsernameNotFound)?;
     let c_service = CString::new(pam_service)
         .map_err(|_| AuthenticationError::PamService(pam_service.to_string()))?;
+    let c_tty = CString::new(tty).map_err(|_| AuthenticationError::Other(PAM_SYSTEM_ERR))?;
+    // For local login, RUSER is typically the same as USER or not set, but setting it ensures modules depending on it behave correctly.
+    let c_ruser = CString::new(username).map_err(|_| AuthenticationError::UsernameNotFound)?;
+    let c_rhost = CString::new("localhost").unwrap();
 
     // Create ConvData on heap
     let conv_data = Box::new(ConvData {
@@ -151,6 +156,11 @@ pub fn open_session(
         conv: Some(conversation),
         appdata_ptr: conv_ptr,
     };
+
+    // Set process environment variables that modules (like pam_systemd or pam_kwallet)
+    // might check during authentication.
+    std::env::set_var("XDG_SEAT", "seat0");
+    std::env::set_var("XDG_VTNR", tty.replace("/dev/tty", ""));
 
     let mut handle: *mut pam_handle_t = ptr::null_mut();
 
@@ -166,18 +176,41 @@ pub fn open_session(
         return Err(AuthenticationError::PamService(pam_service.to_string()));
     }
 
+    // Set PAM_TTY
+    let ret = unsafe { pam_set_item(handle, PAM_TTY, c_tty.as_ptr() as *const libc::c_void) };
+    if ret != PAM_SUCCESS {
+        log::warn!("Failed to set PAM_TTY: {}", ret);
+    }
+
+    // Set PAM_RUSER (often required by pam_rhosts or similar modules, set to username for correctness)
+    let ret = unsafe { pam_set_item(handle, PAM_RUSER, c_ruser.as_ptr() as *const libc::c_void) };
+    if ret != PAM_SUCCESS {
+        log::warn!("Failed to set PAM_RUSER: {}", ret);
+    }
+
+    // Set PAM_RHOST (set to localhost to indicate local origin)
+    let ret = unsafe { pam_set_item(handle, PAM_RHOST, c_rhost.as_ptr() as *const libc::c_void) };
+    if ret != PAM_SUCCESS {
+        log::warn!("Failed to set PAM_RHOST: {}", ret);
+    }
+
+    // 0. Pre-inject password (for modules like pam_kwallet that check PAM_AUTHTOK)
+    let c_password = CString::new(password.expose_secret().as_str()).unwrap();
+    let ret = unsafe {
+        pam_set_item(
+            handle,
+            PAM_AUTHTOK,
+            c_password.as_ptr() as *const libc::c_void,
+        )
+    };
+    if ret != PAM_SUCCESS {
+        log::warn!("Failed to set PAM_AUTHTOK pre-auth: {}", ret);
+    }
+
     // 1. Authenticate
     auth.last_status = unsafe { pam_authenticate(handle, 0) };
     if auth.last_status != PAM_SUCCESS {
         return Err(AuthenticationError::AccountValidation);
-    }
-
-    // Securely clear the password from memory now that authentication is done.
-    // We keep the ConvData struct alive, but empty the Option inside the Mutex.
-    // This assumes subsequent PAM calls won't need the password again.
-    // If they do (e.g. some complex re-auth), this would fail, which is secure-by-default.
-    if let Ok(mut guard) = auth.conv_data.password.lock() {
-        *guard = None;
     }
 
     // 2. Account Management
@@ -187,7 +220,7 @@ pub fn open_session(
     }
 
     // 3. Set Credentials (Initialize Keyrings!)
-    auth.last_status = unsafe { pam_setcred(handle, PAM_ESTABLISH_CRED as i32) };
+    auth.last_status = unsafe { pam_setcred(handle, PAM_ESTABLISH_CRED) };
     if auth.last_status != PAM_SUCCESS {
         match auth.last_status {
             PAM_CRED_UNAVAIL => return Err(AuthenticationError::CredUnavailable),
@@ -200,6 +233,17 @@ pub fn open_session(
     auth.last_status = unsafe { pam_open_session(handle, 0) };
     if auth.last_status != PAM_SUCCESS {
         return Err(AuthenticationError::SessionOpen);
+    }
+
+    // Securely clear the password from memory now that the session is fully established.
+    // 1. Clear from Mutex (Lemurs memory)
+    if let Ok(mut guard) = auth.conv_data.password.lock() {
+        *guard = None;
+    }
+    // 2. Clear from PAM Handle (Libpam memory)
+    // We set it to NULL. Most modules copy it, but this clears the reference in the handle.
+    unsafe {
+        pam_set_item(handle, PAM_AUTHTOK, ptr::null());
     }
 
     log::info!("PAM Session Opened Successfully");

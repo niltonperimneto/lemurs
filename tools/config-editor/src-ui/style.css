@@ -1,0 +1,198 @@
+:root {
+    --bg-base: #1e1e2e;
+    --bg-dark: #181825;
+    --bg-surface: #313244;
+    --fg-text: #cdd6f4;
+    --accent: #cba6f7;
+    --accent-hover: #b4befe;
+    --border: #45475a;
+    --font-mono: 'Courier New', Courier, monospace;
+    --font-ui: system-ui, -apple-system, sans-serif;
+}
+
+body {
+    background-color: var(--bg-base);
+    color: var(--fg-text);
+    font-family: var(--font-ui);
+    margin: 0;
+    height: 100vh;
+    overflow: hidden;
+}
+
+.container {
+    display: grid;
+    grid-template-columns: 250px 1fr 400px;
+    height: 100%;
+}
+
+/* Sidebar */
+.sidebar {
+    background-color: var(--bg-dark);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 1rem;
+}
+
+.brand h1 {
+    margin: 0;
+    font-size: 1.5rem;
+    color: var(--accent);
+}
+
+.brand span {
+    font-size: 0.8rem;
+    opacity: 0.7;
+}
+
+#nav-categories {
+    margin-top: 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    flex: 1;
+}
+
+.nav-item {
+    background: transparent;
+    border: none;
+    color: var(--fg-text);
+    text-align: left;
+    padding: 0.75rem 1rem;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background 0.2s;
+}
+
+.nav-item:hover {
+    background: var(--bg-surface);
+}
+
+.nav-item.active {
+    background: var(--bg-surface);
+    color: var(--accent);
+    font-weight: bold;
+}
+
+.actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.actions button {
+    flex: 1;
+    padding: 0.75rem;
+    border: none;
+    background: var(--accent);
+    color: var(--bg-dark);
+    font-weight: bold;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.actions button:hover {
+    opacity: 0.9;
+}
+
+#btn-reload {
+    background: var(--bg-surface);
+    color: var(--fg-text);
+}
+
+/* Main Content */
+.content {
+    padding: 2rem;
+    overflow-y: auto;
+}
+
+h2 {
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 0.5rem;
+    margin-top: 0;
+}
+
+.form-grid {
+    display: grid;
+    gap: 1.5rem;
+    margin-top: 1.5rem;
+}
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+label {
+    font-weight: 500;
+    font-size: 0.9rem;
+}
+
+input, select {
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    color: var(--fg-text);
+    padding: 0.75rem;
+    border-radius: 4px;
+    font-family: inherit;
+}
+
+input:focus, select:focus {
+    border-color: var(--accent);
+    outline: none;
+}
+
+/* Preview Pane */
+.preview-pane {
+    background: #000;
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+}
+
+.preview-header {
+    background: var(--bg-surface);
+    padding: 0.5rem 1rem;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.tui-screen {
+    flex: 1;
+    background: #000;
+    color: #fff;
+    font-family: var(--font-mono);
+    padding: 1rem;
+    white-space: pre;
+    font-size: 14px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    border: 20px solid #111; /* Bezel */
+}
+
+/* TUI Mock Elements */
+.tui-box {
+    border: 1px solid #fff;
+    padding: 1rem;
+    max-width: 80%;
+    margin-bottom: 1rem;
+    text-align: center;
+}
+
+.tui-clock {
+    font-size: 2rem;
+    margin-bottom: 2rem;
+    font-weight: bold;
+}
+
+.tui-input {
+    border: 1px solid #666;
+    padding: 0.5rem;
+    margin: 0.5rem 0;
+    width: 200px;
+    text-align: left;
+}

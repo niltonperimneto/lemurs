@@ -224,6 +224,20 @@ toml_config_struct! { Config, PartialConfig, RoughConfig,
     password_field => PasswordFieldConfig [PartialPasswordFieldConfig, RoughPasswordFieldConfig],
 
     wayland => WaylandConfig [PartialWaylandConfig, RoughWaylandConfig],
+    design => DesignConfig [PartialDesignConfig, RoughDesignConfig],
+}
+
+toml_config_struct! { DesignConfig, PartialDesignConfig, RoughDesignConfig,
+    layout => LayoutStyle,
+    show_clock => bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub enum LayoutStyle {
+    #[serde(rename = "boxed")]
+    Boxed,
+    #[serde(rename = "minimal")]
+    Minimal,
 }
 
 toml_config_struct! { BackgroundStyleConfig, PartialBackgroundStyleConfig, RoughBackgroundStyleConfig,
@@ -673,6 +687,7 @@ non_string_var_insert! {
     FocusBehaviour ["focus behavior"],
     SwitcherVisibility ["switcher visibility"],
     PanelPosition ["panel position"],
+    LayoutStyle ["layout style"],
 }
 
 impl VariableInsertable for String {

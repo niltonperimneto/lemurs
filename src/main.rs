@@ -304,11 +304,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                     pre_return: None,
                 };
 
-                if let Err(e) = start_session_with_auth(auth_info, &env, &hooks, &config) {
+                if let Err(e) = start_session_with_auth(*auth_info, &env, &hooks, &config) {
                     error!("Failed to start session: {:?}", e);
                 }
             }
             ui::LoginAction::None => break,
+        }
+
+        // Force TTY reset to a sane state.
+        // Sessions (like Plasma/Wayland) can leave the TTY in a weird state (raw mode, echo off, etc.)
+        // which confuses the next run of crossterm / ratatui.
+        if let Ok(exit_status) = std::process::Command::new("stty").arg("sane").status() {
+            if !exit_status.success() {
+                log::warn!(
+                    "'stty sane' failed with exit code: {:?}",
+                    exit_status.code()
+                );
+            }
+        } else {
+            log::warn!("Failed to execute 'stty sane'");
         }
     }
 
@@ -371,8 +385,10 @@ fn start_session_with_auth(
         pre_environment_hook();
     }
 
+    // PAM environment variables must take precedence over inherited system variables.
+    // Using .set() ensures we overwrite any existing entries (like stale XDG vars).
     for (key, value) in auth_session.get_env() {
-        process_env.set_or_own(key, value);
+        process_env.set(key, value);
     }
 
     let tty = config.tty;

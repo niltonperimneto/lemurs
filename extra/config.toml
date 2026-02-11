@@ -171,6 +171,7 @@ key = "F2"
 # The command that is executed when the key is pressed
 cmd = "systemctl reboot -l"
 
+
 # Setting for the selector of the desktop environment you are using.
 [environment_switcher]
 # Terms:
@@ -211,7 +212,7 @@ toggle_hint_modifiers = ""
 
 # Show an option for the TTY shell when logging in as one of the environments. 
 # NOTE: it is always shown when no viable options are found. 
-include_tty_shell = false
+include_tty_shell = true
 
 # Remember the selected environment after logging in for the next time
 remember = true
@@ -341,33 +342,6 @@ use_max_width = true
 # The contraint of the password field's width
 max_width = 48
 
-[x11]
-# Where to log to for the XServer.
-xserver_log_path = "/var/log/lemurs.xorg.log"
-
-# The value of the `DISPLAY` environment variable for X11 sessions
-x11_display = ":1"
-
-# How many seconds to give the X server to start. To make it infinitely, put it
-# to 0.
-xserver_timeout_secs = 60
-
-# Where to find the X11 server binary
-xserver_path = "/usr/bin/X"
-
-# Where to find the X11 xauth binary
-xauth_path = "/usr/bin/xauth"
-
-# Path to the directory where the startup scripts for the X11 sessions are found
-scripts_path = "/etc/lemurs/wms"
-
-# Path to the xsetup script that is needed for the environment setup of the
-# window manager.
-xsetup_path = "/etc/lemurs/xsetup.sh"
-
-# The directory to use for desktop entries X11 sessions.
-xsessions_path = "/usr/share/xsessions"
-
 [wayland]
 # Path to the directory where the startup scripts for the Wayland sessions are
 # found
@@ -375,3 +349,9 @@ scripts_path = "/etc/lemurs/wayland"
 
 # The directory to use for desktop entries wayland sessions.
 wayland_sessions_path = "/usr/share/wayland-sessions"
+
+[design]
+# Layout style: "boxed" (default) or "minimal"
+layout = "boxed"
+# Show the big clock widget
+show_clock = true

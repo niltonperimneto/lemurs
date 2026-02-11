@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lemurs Config</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="app.js" defer></script>
+</head>
+<body>
+    <div class="container">
+        <aside class="sidebar">
+            <div class="brand">
+                <h1>Lemurs</h1>
+                <span>Config Editor</span>
+            </div>
+            <nav id="nav-categories">
+                <!-- Categories injected here -->
+                <button class="nav-item active" data-cat="general">General</button>
+                <button class="nav-item" data-cat="design">Design</button>
+                <button class="nav-item" data-cat="background">Background</button>
+                <button class="nav-item" data-cat="panel">Panel</button>
+                <button class="nav-item" data-cat="power">Power</button>
+            </nav>
+            <div class="actions">
+                <button id="btn-save">Save Config</button>
+                <button id="btn-reload">Reload</button>
+            </div>
+        </aside>
+        <main class="content">
+            <header>
+                <h2 id="section-title">General Settings</h2>
+            </header>
+            <div id="form-container" class="form-grid">
+                <!-- Form inputs injected here -->
+            </div>
+        </main>
+        <aside class="preview-pane">
+            <div class="preview-header">Preview (Approximate)</div>
+            <div id="tui-preview" class="tui-screen">
+                <!-- CSS-based TUI emulation -->
+            </div>
+        </aside>
+    </div>
+</body>
+</html>

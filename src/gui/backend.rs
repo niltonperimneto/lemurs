@@ -3,10 +3,10 @@ use crate::ui::LoginBackend;
 use ratatui::backend::Backend;
 use ratatui::buffer::Cell;
 
-use std::io;
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use rusttype::{Font, Point, Scale};
 use std::fs;
-use rusttype::{Font, Scale, Point};
-use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
+use std::io;
 
 use std::collections::HashMap;
 
@@ -37,8 +37,11 @@ impl KmsRatatuiBackend {
         if let Ok(data) = fs::read(&config.font_path) {
             font_data = data;
         } else {
-            eprintln!("Warning: Failed to load configured font at '{}'", config.font_path);
-            
+            eprintln!(
+                "Warning: Failed to load configured font at '{}'",
+                config.font_path
+            );
+
             // 2. Try common system fonts
             let fallbacks = [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -58,20 +61,22 @@ impl KmsRatatuiBackend {
         }
 
         let font = if !font_data.is_empty() {
-             Font::try_from_vec(font_data).expect("Error parsing font data")
+            Font::try_from_vec(font_data).expect("Error parsing font data")
         } else {
-            eprintln!("CRITICAL: No usable font found! Please install DejaVu Sans Mono or configure a valid font in config.toml.");
-            panic!("No font found."); 
+            eprintln!("Warning: No system font found. Using embedded fallback font.");
+            const FALLBACK_FONT: &[u8] =
+                include_bytes!("../../assets/fonts/RobotoMonoNerdFont-Regular.ttf");
+            Font::try_from_bytes(FALLBACK_FONT).expect("Error parsing embedded fallback font")
         };
-        
+
         // Define font size from config
         let scale = Scale::uniform(config.font_size as f32);
-        
+
         // Calculate metrics for a utility character to determine cell size
         let v_metrics = font.v_metrics(scale);
         let glyph = font.glyph('M').scaled(scale);
         let h_metrics = glyph.h_metrics();
-        
+
         let char_width = h_metrics.advance_width.ceil() as u32;
         let char_height = (v_metrics.ascent - v_metrics.descent + v_metrics.line_gap).ceil() as u32;
 
@@ -105,7 +110,9 @@ impl KmsRatatuiBackend {
             ratatui::style::Color::LightMagenta => 0x00FF80FF,
             ratatui::style::Color::LightCyan => 0x0080FFFF,
             ratatui::style::Color::White => 0x00FFFFFF,
-            ratatui::style::Color::Rgb(r, g, b) => ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+            ratatui::style::Color::Rgb(r, g, b) => {
+                ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+            }
             ratatui::style::Color::Indexed(_) => 0x00FFFFFF, // Fallback
         }
     }
@@ -113,38 +120,45 @@ impl KmsRatatuiBackend {
     // Rasterize a character and return its cached data
     fn get_cached_glyph(&mut self, c: char) -> &CachedGlyph {
         if !self.glyph_cache.contains_key(&c) {
-             let v_metrics = self.font.v_metrics(self.scale);
-             let glyph = self.font.glyph(c).scaled(self.scale).positioned(point(0.0, v_metrics.ascent));
-             
-             let mut bitmap = Vec::new();
-             let mut width = 0;
-             let mut height = 0;
-             let mut offset_x = 0;
-             let mut offset_y = 0;
+            let v_metrics = self.font.v_metrics(self.scale);
+            let glyph = self
+                .font
+                .glyph(c)
+                .scaled(self.scale)
+                .positioned(point(0.0, v_metrics.ascent));
 
-             if let Some(bb) = glyph.pixel_bounding_box() {
-                 width = bb.width() as u32;
-                 height = bb.height() as u32;
-                 offset_x = bb.min.x;
-                 offset_y = bb.min.y;
-                 
-                 bitmap.resize((width * height) as usize, 0);
-                 
-                 glyph.draw(|x, y, v| {
-                     let idx = (y * width + x) as usize;
-                     if idx < bitmap.len() {
-                         bitmap[idx] = (v * 255.0) as u8;
-                     }
-                 });
-             }
-             
-             self.glyph_cache.insert(c, CachedGlyph {
-                 width,
-                 height,
-                 bitmap,
-                 offset_x,
-                 offset_y,
-             });
+            let mut bitmap = Vec::new();
+            let mut width = 0;
+            let mut height = 0;
+            let mut offset_x = 0;
+            let mut offset_y = 0;
+
+            if let Some(bb) = glyph.pixel_bounding_box() {
+                width = bb.width() as u32;
+                height = bb.height() as u32;
+                offset_x = bb.min.x;
+                offset_y = bb.min.y;
+
+                bitmap.resize((width * height) as usize, 0);
+
+                glyph.draw(|x, y, v| {
+                    let idx = (y * width + x) as usize;
+                    if idx < bitmap.len() {
+                        bitmap[idx] = (v * 255.0) as u8;
+                    }
+                });
+            }
+
+            self.glyph_cache.insert(
+                c,
+                CachedGlyph {
+                    width,
+                    height,
+                    bitmap,
+                    offset_x,
+                    offset_y,
+                },
+            );
         }
         self.glyph_cache.get(&c).unwrap()
     }
@@ -155,10 +169,16 @@ impl KmsRatatuiBackend {
         let char_height = self.char_height;
         let px = x as i32 * char_width as i32;
         let py = y as i32 * char_height as i32;
-        
+
         // Draw a simple cursor block (white) at the bottom
         // Use fill_rect for efficiency
-        self.kms.fill_rect(px as u32, (py + char_height as i32 - 4) as u32, char_width, 4, 0x00FFFFFF);
+        self.kms.fill_rect(
+            px as u32,
+            (py + char_height as i32 - 4) as u32,
+            char_width,
+            4,
+            0x00FFFFFF,
+        );
     }
 }
 
@@ -170,10 +190,16 @@ impl Backend for KmsRatatuiBackend {
         for (x, y, cell) in content {
             let px = x as i32 * self.char_width as i32;
             let py = y as i32 * self.char_height as i32;
-            
+
             let bg_color = Self::color_to_rgb(cell.bg);
-            self.kms.fill_rect(px as u32, py as u32, self.char_width, self.char_height, bg_color);
-            
+            self.kms.fill_rect(
+                px as u32,
+                py as u32,
+                self.char_width,
+                self.char_height,
+                bg_color,
+            );
+
             let content_str = cell.symbol();
             if content_str.is_empty() || content_str == " " {
                 continue;
@@ -192,30 +218,33 @@ impl Backend for KmsRatatuiBackend {
                 if !self.glyph_cache.contains_key(&c) {
                     self.get_cached_glyph(c);
                 }
-                
+
                 let glyph = self.glyph_cache.get(&c).unwrap();
-                
+
                 // Now we have the glyph data (immutable borrow of cache), we can mutate kms.
                 let screen_x_base = px + glyph.offset_x;
                 let screen_y_base = py + glyph.offset_y;
 
                 for gy in 0..glyph.height {
-                     for gx in 0..glyph.width {
-                          let alpha = glyph.bitmap[(gy * glyph.width + gx) as usize] as u32;
-                          if alpha == 0 { continue; }
+                    for gx in 0..glyph.width {
+                        let alpha = glyph.bitmap[(gy * glyph.width + gx) as usize] as u32;
+                        if alpha == 0 {
+                            continue;
+                        }
 
-                          let screen_x = screen_x_base + gx as i32;
-                          let screen_y = screen_y_base + gy as i32;
+                        let screen_x = screen_x_base + gx as i32;
+                        let screen_y = screen_y_base + gy as i32;
 
-                          let inv_alpha = 255 - alpha;
-                          
-                          let out_r = (fg_r * alpha + bg_r * inv_alpha) / 255;
-                          let out_g = (fg_g * alpha + bg_g * inv_alpha) / 255;
-                          let out_b = (fg_b * alpha + bg_b * inv_alpha) / 255;
-                          
-                          let out_color = (out_r << 16) | (out_g << 8) | out_b;
-                          self.kms.set_pixel(screen_x as u32, screen_y as u32, out_color);
-                     }
+                        let inv_alpha = 255 - alpha;
+
+                        let out_r = (fg_r * alpha + bg_r * inv_alpha) / 255;
+                        let out_g = (fg_g * alpha + bg_g * inv_alpha) / 255;
+                        let out_b = (fg_b * alpha + bg_b * inv_alpha) / 255;
+
+                        let out_color = (out_r << 16) | (out_g << 8) | out_b;
+                        self.kms
+                            .set_pixel(screen_x as u32, screen_y as u32, out_color);
+                    }
                 }
             }
         }
@@ -245,7 +274,10 @@ impl Backend for KmsRatatuiBackend {
         Ok(ratatui::layout::Position { x, y })
     }
 
-    fn set_cursor_position<P: Into<ratatui::layout::Position>>(&mut self, position: P) -> Result<(), io::Error> {
+    fn set_cursor_position<P: Into<ratatui::layout::Position>>(
+        &mut self,
+        position: P,
+    ) -> Result<(), io::Error> {
         let p = position.into();
         self.set_cursor_state(p.x, p.y);
         Ok(())
@@ -259,14 +291,20 @@ impl Backend for KmsRatatuiBackend {
     fn size(&self) -> io::Result<ratatui::layout::Size> {
         let cols = self.kms.width() / self.char_width;
         let rows = self.kms.height() / self.char_height;
-        Ok(ratatui::layout::Size { width: cols as u16, height: rows as u16 })
+        Ok(ratatui::layout::Size {
+            width: cols as u16,
+            height: rows as u16,
+        })
     }
 
     fn window_size(&mut self) -> Result<ratatui::backend::WindowSize, io::Error> {
         let cols = self.kms.width() / self.char_width;
         let rows = self.kms.height() / self.char_height;
-        let s = ratatui::layout::Size { width: cols as u16, height: rows as u16 };
-        
+        let s = ratatui::layout::Size {
+            width: cols as u16,
+            height: rows as u16,
+        };
+
         Ok(ratatui::backend::WindowSize {
             columns_rows: s,
             pixels: ratatui::layout::Size {
@@ -290,6 +328,7 @@ impl LoginBackend for KmsRatatuiBackend {
     fn disable_ui(&mut self) -> io::Result<()> {
         disable_raw_mode()?;
         self.kms.fill_screen(0);
+        self.kms.flush();
         Ok(())
     }
 }

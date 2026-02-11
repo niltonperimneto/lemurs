@@ -37,14 +37,11 @@ pub fn try_auth(
     username: &str,
     password: &SecretString,
     pam_service: &str,
+    tty: &str,
 ) -> Result<AuthUserInfo, AuthenticationError> {
-    info!("Login attempt for '{username}'");
+    info!("Login attempt for '{username}' on '{tty}'");
 
-    open_session(username, password, pam_service).inspect_err(|err| {
-        info!(
-            "Authentication failed for '{}'. Reason: {}",
-            username,
-            err.to_string()
-        );
+    open_session(username, password, pam_service, tty).inspect_err(|err| {
+        info!("Authentication failed for '{}'. Reason: {}", username, err);
     })
 }

@@ -11,6 +11,7 @@ use std::borrow::Cow;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::{get_color, InputFieldStyle};
+use crate::ui::status_message::ErrorStatusMessage;
 
 /// The type of the input field display. How are the characters which are typed displayed?
 #[derive(Clone)]
@@ -317,7 +318,7 @@ impl InputFieldWidget {
         &mut self,
         key_code: KeyCode,
         modifiers: KeyModifiers,
-    ) -> Option<super::ErrorStatusMessage> {
+    ) -> Option<ErrorStatusMessage> {
         match (key_code, modifiers) {
             (KeyCode::Backspace, _) | (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
                 self.backspace()
